@@ -9,6 +9,8 @@ import time
 import readline
 import os
 import sys
+import hashlib
+import getpass
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +18,10 @@ from pathlib import Path
 C2_URL = "http://c2.s0p0wned.local:8443"
 LOG_DIR = Path("logs")
 LOG_FILE = LOG_DIR / f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+# Mot de passe CLI — générer avec :
+#   python3 -c "import hashlib; print(hashlib.sha256(b'tonmotdepasse').hexdigest())"
+CLI_PASSWORD_HASH = "310b1e95a0d3f895d83775fc79073b82eef0f02cb47945cbc6e781c70ccbb68b"
 
 # Variables globales
 current_agent = None
@@ -38,12 +44,19 @@ def log(message):
 
 
 def print_banner():
-    """Affiche le banner du C2"""
-    banner = """
-╔═══════════════════════════════════════════════════════════╗
-║              s0P0wn3d C2 - Operator CLI                  ║
-║                   Version 1.0 - MVP                       ║
-╚═══════════════════════════════════════════════════════════╝
+    """Affiche le banner du C2."""
+    banner = r"""
+╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║__________________/\\\\\\\______________________/\\\\\\\________________________________________/\\\\\\\\\\__________/\\\__________║
+║_________________/\\\/////\\\__________________/\\\/////\\\____________________________________/\\\///////\\\________\/\\\_________║
+║_________________/\\\____\//\\\___/\\\\\\\\\___/\\\____\//\\\__________________________________\///______/\\\_________\/\\\________║
+║_____/\\\\\\\\\\_\/\\\_____\/\\\__/\\\/////\\\_\/\\\_____\/\\\__/\\____/\\___/\\__/\\/\\\\\\___________/\\\//__________\/\\\_______║
+║_____\/\\\//////__\/\\\_____\/\\\_\/\\\\\\\\\\__\/\\\_____\/\\\_\/\\\__/\\\\_/\\\_\/\\\////\\\_________\////\\\____/\\\\\\\\\______║
+║______\/\\\\\\\\\\_\/\\\_____\/\\\_\/\\\//////___\/\\\_____\/\\\_\//\\\/\\\\\/\\\__\/\\\__\//\\\___________\//\\\__/\\\////\\\_____║
+║_______\////////\\\_\//\\\____/\\\__\/\\\_________\//\\\____/\\\___\//\\\\\/\\\\\___\/\\\___\/\\\__/\\\______/\\\__\/\\\__\/\\\____║
+║_________/\\\\\\\\\\__\///\\\\\\\/___\/\\\__________\///\\\\\\\/_____\//\\\\//\\\____\/\\\___\/\\\_\///\\\\\\\\\/___\//\\\\\\\/\\__║
+║_________\//////////_____\///////_____\///_____________\///////________\///__\///_____\///____\///____\/////////______\///////\//__║
+╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
 """
     print(banner)
     print(f"[*] Server: {C2_URL}")
@@ -633,7 +646,7 @@ def get_prompt():
     return "c2> "
 
 
-def setup_readline():
+#def setup_readline():
     """Configure readline pour l'historique"""
     # Créer le fichier d'historique
     history_file = LOG_DIR / ".cli_history"
@@ -650,12 +663,66 @@ def setup_readline():
     # Configurer l'auto-complétion (basique)
     readline.parse_and_bind("tab: complete")
 
+def setup_readline():
+    """Configure readline pour l'historique (cross-platform)"""
+    history_file = str(LOG_DIR / ".cli_history")  # str() obligatoire
+
+    if sys.platform == "win32":
+        try:
+            import pyreadline3  # pip install pyreadline3
+            pyreadline3.read_history_file(history_file)
+        except (ImportError, OSError):
+            pass
+        return
+
+    # macOS et Linux
+    try:
+        import readline
+        # macOS utilise libedit : la syntaxe de bind diffère
+        if sys.platform == "darwin":
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+
+        try:
+            readline.read_history_file(history_file)
+        except (FileNotFoundError, OSError):
+            pass
+
+        import atexit
+        atexit.register(readline.write_history_file, history_file)
+
+    except ImportError:
+        pass  # readline non dispo, on continue sans historique
+
+
+def authenticate():
+    """Authentification de l'opérateur avant accès à la CLI"""
+    MAX_ATTEMPTS = 3
+    for attempt in range(MAX_ATTEMPTS):
+        remaining = MAX_ATTEMPTS - attempt
+        try:
+            pwd = getpass.getpass(f"  [?] Password ({remaining} attempt{'s' if remaining > 1 else ''} left): ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n[-] Cancelled.")
+            sys.exit(1)
+
+        if hashlib.sha256(pwd.encode()).hexdigest() == CLI_PASSWORD_HASH:
+            print("[+] Authenticated.\n")
+            return
+
+        print("[-] Wrong password.")
+
+    print("[-] Too many failed attempts. Exiting.")
+    sys.exit(1)
+
 
 def main():
     """Boucle principale de la CLI"""
     init_logs()
     setup_readline()
     print_banner()
+    authenticate()
 
     # Vérifier la connexion au serveur
     try:

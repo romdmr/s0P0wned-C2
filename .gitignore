@@ -1,6 +1,8 @@
 # Created by https://www.toptal.com/developers/gitignore/api/python,pycharm,c,visualstudiocode,flask
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,pycharm,c,visualstudiocode,flask
 
+.DS_Store
+T-SEC-901_project-1.pdf
 ### C ###
 # Prerequisites
 *.d
