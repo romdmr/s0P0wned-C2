@@ -3,9 +3,8 @@
 
 #include <windows.h>
 #include <shlobj.h>
-// taskschd.h et comdef.h ne sont pas nécessaires (on utilise schtasks.exe via shell)
 
-// Codes de retour
+/* Return codes */
 #define PERSIST_SUCCESS 0
 #define PERSIST_ERROR_REGISTRY 1
 #define PERSIST_ERROR_TASK 2

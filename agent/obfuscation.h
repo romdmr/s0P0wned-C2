@@ -57,8 +57,7 @@ static inline void deobfuscate(const char *obfuscated, char *output, size_t max_
 }
 
 /**
- * Décode une string obfusquée dans un buffer temporaire
- * ATTENTION: Non thread-safe, utiliser immédiatement
+ * Décode une string obfusquée dans un buffer temporaire (non thread-safe).
  */
 static inline char* deobf_tmp(const char *obfuscated) {
     static char buffer[256];

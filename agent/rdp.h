@@ -27,8 +27,6 @@
  * @param output Buffer pour stocker le résultat
  * @param size Taille du buffer
  * @return RDP_SUCCESS ou code d'erreur
- *
- * ATTENTION: Nécessite privilèges administrateur
  */
 int rdp_enable(char *output, size_t size);
 
@@ -67,8 +65,6 @@ int rdp_status(char *output, size_t size);
  * @param output Buffer pour stocker le résultat
  * @param size Taille du buffer
  * @return RDP_SUCCESS ou code d'erreur
- *
- * ATTENTION: Très suspect, sera loggé dans Event Viewer
  */
 int rdp_adduser(const char *username, const char *password, char *output, size_t size);
 

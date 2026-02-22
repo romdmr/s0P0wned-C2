@@ -47,8 +47,6 @@ int loot_sysinfo(char *output, size_t size);
  * @param output Buffer pour stocker les chemins trouvés
  * @param size Taille du buffer
  * @return LOOT_SUCCESS ou code d'erreur
- *
- * ATTENTION: Recherche récursive, peut être lente
  */
 int loot_find(const char *pattern, char *output, size_t size);
 
@@ -62,8 +60,6 @@ int loot_find(const char *pattern, char *output, size_t size);
  * @param output Buffer pour stocker le contenu encodé
  * @param size Taille du buffer
  * @return LOOT_SUCCESS ou code d'erreur
- *
- * ATTENTION: Lecture de fichiers sensibles = très suspect
  */
 int loot_grab(const char *filepath, char *output, size_t size);
 
@@ -78,9 +74,6 @@ int loot_grab(const char *filepath, char *output, size_t size);
  * @param output Buffer pour stocker les chemins des DB trouvées
  * @param size Taille du buffer
  * @return LOOT_SUCCESS ou code d'erreur
- *
- * ATTENTION: Les DB sont souvent chiffrées (DPAPI)
- * Cette fonction retourne juste les chemins, pas le contenu décrypté
  */
 int loot_browser(char *output, size_t size);
 

